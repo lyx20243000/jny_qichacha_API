@@ -39,6 +39,8 @@ dependencies = [
     "pycairo==1.29.0",
     "dbus-python==1.3.2",
     "PyGObject==3.48.2",
+    "lark-oapi>=1.6.8",
+    "dingtalk-stream>=0.24.3",
 ]
 
 [tool.uv]
