@@ -435,19 +435,29 @@ def _set_persistent_cached(key: str, value: str) -> None:
         logger.debug("Skip writing qixin persistent cache: %s", exc)
 
 
-def _get_cached(key: str) -> str | None:
+def _get_cached(key: str) -> tuple[str | None, str]:
+    """获取缓存值和来源。
+
+    Returns:
+        tuple[value, source]: value 为缓存内容，source 为来源标识
+            - "memory": 进程内内存缓存命中
+            - "persistent": 持久化缓存（文件系统）命中
+            - "": 未命中任何缓存
+    """
     if QIXIN_CACHE_TTL_SECONDS <= 0:
-        return _get_persistent_cached(key)
+        val = _get_persistent_cached(key)
+        return val, "persistent" if val is not None else ""
     cached = _QIXIN_CACHE.get(key)
     if cached:
         cached_at, value = cached
         if time.time() - cached_at <= QIXIN_CACHE_TTL_SECONDS:
-            return value
+            return value, "memory"  # 内存缓存命中
         _QIXIN_CACHE.pop(key, None)
     persistent = _get_persistent_cached(key)
     if persistent is not None:
         _QIXIN_CACHE[key] = (time.time(), persistent)
-    return persistent
+        return persistent, "persistent"  # 持久化缓存命中
+    return None, ""
 
 
 def _set_cached(key: str, value: str) -> None:
@@ -475,14 +485,14 @@ def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: 
     request_params = dict(spec.get("extra_params") or {})
     request_params.update(params or {})
     key = _cache_key(api_id, request_params)
-    cached = _get_cached(key)
+    cached, cache_source = _get_cached(key)
     if cached is not None:
-        logger.info("Qixin API cache hit: api_id=%s", api_id)
-        # 在返回值中标记缓存命中，供采集诊断使用
+        logger.info("Qixin API cache hit: api_id=%s source=%s", api_id, cache_source)
+        # 在返回值中标记缓存来源，供采集诊断使用
         try:
             cached_data = json.loads(cached)
             if isinstance(cached_data, dict):
-                cached_data["_cache_source"] = "persistent"
+                cached_data["_cache_source"] = cache_source  # "memory" 或 "persistent"
                 return json.dumps(cached_data, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError):
             pass
