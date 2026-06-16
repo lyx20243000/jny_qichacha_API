@@ -1,5 +1,5 @@
 """报告生成工具 - 由 Agent 调用，完成评分计算和 PDF 报告生成
-优先复用 Agent 已采集的启信宝主数据和企查查 MCP 补充数据，未传入时再兜底查询 MCP。"""
+严格复用 collect_enterprise_evidence 已采集的数据，报告阶段不再主动查询 MCP，避免数据漂移和额度重复消耗。"""
 
 import json
 import logging
@@ -239,7 +239,15 @@ def _resolve_report_enterprise_name(scoring_result: dict, fallback_name: str) ->
 
 
 def _fetch_qcc_data(enterprise_name: str) -> dict:
-    """自动调用企查查 MCP 获取核心结构化数据，返回汇总字典"""
+    """[已废弃] 自动调用企查查 MCP 获取核心结构化数据
+    
+    ⚠️ 该函数已不再被报告阶段调用，原因：
+    1. 数据漂移：报告阶段查到的数据可能和 collect_enterprise_evidence 阶段不一致
+    2. 额度消耗：同一次分析会消耗两次 MCP 额度
+    3. 策略不一致：报告阶段应该消费固定采集结果
+    
+    保留该函数是为了可能的未来用途（如独立调试），但不应在正常流程中调用。
+    """
     qcc_data = {}
     if not is_qcc_mcp_available():
         qcc_data["mcp_status"] = "企查查MCP未配置可用 Key 或当天额度已耗尽，报告阶段跳过自动补查。"
@@ -590,7 +598,8 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
     except json.JSONDecodeError as e:
         return f"评分结果JSON解析失败: {str(e)}"
 
-    # 0. 复用 Agent 已拿到的企查查 MCP 数据；未传入时再兜底查询
+    # 0. 严格复用 collect_enterprise_evidence 已采集的 MCP 数据，报告阶段不再主动查询
+    # 避免数据漂移和 MCP 额度重复消耗
     qcc_data = {}
     qcc_summary = ""
     if qcc_data_json:
@@ -602,13 +611,10 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
             logger.warning(f"QCC MCP data parse failed for {enterprise_name}: {e}")
             qcc_summary = "【企查查MCP数据解析失败，仅基于评分JSON生成报告】"
     else:
-        try:
-            qcc_data = _fetch_qcc_data(enterprise_name)
-            qcc_summary = _qcc_data_to_summary(qcc_data)
-            logger.info(f"QCC MCP data fetched for {enterprise_name}, fields: {list(qcc_data.keys())}")
-        except Exception as e:
-            logger.warning(f"QCC MCP data fetch failed for {enterprise_name}: {e}")
-            qcc_summary = "【企查查MCP数据获取失败，仅基于联网搜索数据生成报告】"
+        # 报告阶段不再主动查询 MCP，避免数据漂移和额度消耗
+        logger.warning(f"QCC MCP data not provided for {enterprise_name}, report will be generated without MCP data. "
+                       f"This indicates collect_enterprise_evidence did not pass qcc_data_json.")
+        qcc_summary = "【未提供企查查MCP数据，仅基于评分JSON生成报告】"
 
     if qcc_data:
         _ensure_enterprise_profile(scoring_result, enterprise_name, qcc_data)
