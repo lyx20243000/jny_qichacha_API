@@ -232,14 +232,15 @@ class GraphService:
     def graph_inout_schema(self) -> Any:
         if graph_helper.is_agent_proj():
             return {"input_schema": {}, "output_schema": {}}
-        builder = getattr(self._get_graph(), 'builder', None)
+        graph = self._get_graph()
+        builder = getattr(graph, 'builder', None)
         if builder is not None:
-            input_cls = getattr(builder, 'input_schema', None) or self.graph.get_input_schema()
-            output_cls = getattr(builder, 'output_schema', None) or self.graph.get_output_schema()
+            input_cls = getattr(builder, 'input_schema', None) or graph.get_input_schema()
+            output_cls = getattr(builder, 'output_schema', None) or graph.get_output_schema()
         else:
             logger.warning(f"No builder input schema found for graph_inout_schema, using graph input schema instead")
-            input_cls = self.graph.get_input_schema()
-            output_cls = self.graph.get_output_schema()
+            input_cls = graph.get_input_schema()
+            output_cls = graph.get_output_schema()
 
         return {
             "input_schema": input_cls.model_json_schema(), 
