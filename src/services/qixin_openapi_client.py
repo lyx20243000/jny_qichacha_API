@@ -38,6 +38,20 @@ _load_local_env()
 
 QIXIN_APPKEY = os.getenv("QIXIN_APPKEY", os.getenv("QIXIN_OPENAPI_APPKEY", ""))
 QIXIN_SECRET_KEY = os.getenv("QIXIN_SECRET_KEY", os.getenv("QIXIN_OPENAPI_SECRET_KEY", ""))
+
+# ===== 启动诊断日志：部署后通过生产日志确认启信宝配置状态 =====
+if QIXIN_APPKEY and QIXIN_SECRET_KEY:
+    logger.info(
+        "Qixin API configured: appkey=%s...(%d chars), auth_version=%s",
+        QIXIN_APPKEY[:6], len(QIXIN_APPKEY), QIXIN_AUTH_VERSION,
+    )
+else:
+    logger.warning(
+        "Qixin API NOT configured: QIXIN_APPKEY=%s, QIXIN_SECRET_KEY=%s. "
+        "All Qixin API calls will return config_missing.",
+        "set" if QIXIN_APPKEY else "missing",
+        "set" if QIXIN_SECRET_KEY else "missing",
+    )
 QIXIN_AUTH_VERSION = os.getenv("QIXIN_AUTH_VERSION", "2.0")
 try:
     QIXIN_CACHE_TTL_SECONDS = int(os.getenv("QIXIN_CACHE_TTL_SECONDS", "259200"))
@@ -473,6 +487,12 @@ def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: 
             data = resp.json()
         except ValueError:
             data = {"raw_text": resp.text[:1000]}
+        logger.info(
+            "Qixin API response: api_id=%s status=%d data_keys=%s ok=%s",
+            api_id, resp.status_code,
+            list(data.keys())[:5] if isinstance(data, dict) else "non-dict",
+            str(data.get("Status", "")) if isinstance(data, dict) else "unknown",
+        )
         if resp.status_code != 200:
             return _build_qixin_error_result(
                 api_id,
