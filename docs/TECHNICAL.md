@@ -14,11 +14,11 @@ git diff --check
 
 ## 核心数据流
 
-1. 用户通过 `/run`、`/stream_run`、`/async_run` 或 OpenAI 兼容接口提交企业查询请求。
+1. 用户通过 `/run`、`/stream_run`、`/async_run` 或 OpenAI 兼容接口提交企业查询请求；其中 `/stream_run` 在长耗时执行期间会每 10 秒输出一次 `progress` SSE 事件，用于告知上游任务仍在进行中。
 2. `src/main.py` 创建 Coze 运行上下文和 LangGraph run config。
 3. `src/agents/agent.py` 根据 `config/agent_llm_config.json` 构建 Agent 和工具列表。
 4. Agent 必须先调用 `collect_enterprise_evidence`。
-5. `collect_enterprise_evidence` 内部完成主体确认、启信宝白名单 API 固定采集、公开搜索、国家企业信用信息公示系统搜索、企查查 MCP 补缺和证据整理。
+5. `collect_enterprise_evidence` 内部完成主体确认、启信宝白名单 API 固定采集、公开搜索、按模式决定是否追加国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
 6. Agent 基于 `evidence_json` / `evidence_summary` 解读、评分并构建 `scoring_json`。
 7. Agent 调用 `generate_enterprise_report`，并尽量传入 `qcc_data_json`，避免报告阶段重复请求企查查 MCP。
 
@@ -28,8 +28,7 @@ git diff --check
 
 - 启信宝 API 做主数据源。
 - 企查查 MCP 做补充数据源。
-- 企查查 OpenAPI 整体退出。
-- CNBizAPI 保留兼容，但默认不进入固定采集链路。
+- 当前结构化采集链路仅包含启信宝 API 和企查查 MCP。
 
 启信宝 API 只允许使用白名单接口：
 
@@ -50,6 +49,8 @@ QIXIN_APPKEY=...
 QIXIN_SECRET_KEY=...
 QIXIN_AUTH_VERSION=2.0
 QIXIN_CACHE_TTL_SECONDS=259200
+QIXIN_PERSISTENT_CACHE_TTL_SECONDS=86400
+QIXIN_CIRCUIT_BREAKER_SECONDS=600
 QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 ```
 
@@ -73,7 +74,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `search_enterprise_risk`
 - `search_enterprise_finance`
 - `search_enterprise_development`
-- `search_gsxt_info`
+- `search_gsxt_info`（Agent 可单独补查；`collect_enterprise_evidence` 仅在 `deep` 模式固定带出 gsxt/gsxt_risk 搜索线索）
 - `fetch_enterprise_page`
 - `qcc_get_basic_info`
 - `qcc_get_finance_info`
@@ -84,11 +85,6 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `qcc_get_extended_risk_info`
 - `generate_enterprise_report`
 
-已移除工具：
-
-- `query_enterprise_detail_api`
-- `query_qcc_openapi`
-
 ## 固定采集返回
 
 `collect_enterprise_evidence` 返回：
@@ -98,14 +94,13 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `collection_policy`
 - `evidence_summary`
 - `search_evidence`
-- `cnbizapi`
 - `qixin_api`
 - `qcc_mcp`
 - `triggered_mcp`
 - `qcc_data_json`
 - `collection_diagnostics`
 
-`qcc_data_json` 名称暂时保留为兼容字段，内部实际承载“启信宝 API 主数据源 + 企查查 MCP 补充数据源”的紧凑 JSON，供 `generate_enterprise_report` 复用。当前已增加：
+`qcc_data_json` 名称暂时保留为兼容字段，内部实际承载“启信宝 API 主数据源 + 企查查 MCP 补充数据源”的紧凑 JSON，供 `generate_enterprise_report` 复用。报告阶段默认只复用这里已传入的数据，不再主动发起新的 MCP 查询。当前已增加：
 
 - `field_sources`：标记关键字段最终来自启信宝、企查查 MCP 还是触发补查。
 - `source_conflicts`：当多个来源都返回值但内容不一致时，记录字段名和各来源预览，便于排查冲突和后续报告解释。
@@ -135,7 +130,7 @@ EVIDENCE_FIELD_MAX_CHARS=2500
 
 ## 报告输出
 
-`generate_enterprise_report` 必须传入 `enterprise_name` 和合法紧凑 JSON 字符串 `scoring_json`。建议同时传入 `qcc_data_json`，复用固定采集数据。
+`generate_enterprise_report` 必须传入 `enterprise_name` 和合法紧凑 JSON 字符串 `scoring_json`。建议同时传入 `qcc_data_json`，复用固定采集数据；未传入时，报告仍可生成，但只基于现有 `scoring_json` 和已传入内容，不会在报告阶段自动回查 MCP。
 
 PDF 报告由 Markdown 正文通过 Coze `DocumentGenerationClient.create_pdf_from_markdown` 生成。
 
@@ -166,4 +161,4 @@ QCC_MCP_API_KEY05=...
 QCC_MCP_API_KEY06=...
 ```
 
-当 MCP 返回 `code=300008`、积分余额不足或额度不足时，客户端会标记当前 Key 已耗尽并尝试下一个 Key。所有 Key 不可用时，后续 MCP 补查直接跳过，Agent 应转用公开搜索和已采集的启信宝数据，不得调用企查查 OpenAPI。
+当 MCP 返回 `code=300008`、积分余额不足或额度不足时，客户端会标记当前 Key 已耗尽并尝试下一个 Key。所有 Key 不可用时，后续 MCP 补查直接跳过，Agent 应转用公开搜索和已采集的启信宝数据。

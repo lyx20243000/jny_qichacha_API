@@ -9,7 +9,6 @@ from coze_coding_utils.runtime_ctx.context import new_context
 from coze_coding_utils.log.write_log import request_context
 from services.qcc_mcp_client import query_company_registration
 from services.qixin_openapi_client import query_qixin_basic
-from services.cnbizapi_client import query_company_basic, query_company_search
 
 logger = logging.getLogger(__name__)
 
@@ -288,24 +287,6 @@ def _query_registration_by_mcp(search_key: str) -> dict:
     return _pick_unique_payload(search_key, payloads)
 
 
-def _query_registration_by_cnbizapi(search_key: str) -> dict:
-    """用 CNBizAPI 查询企业主体。当前默认主体确认链路不再主动调用。"""
-    api_calls = [
-        lambda: query_company_basic(search_key),
-    ]
-    if not _is_social_credit_code(search_key):
-        api_calls.append(lambda: query_company_search(search_key, limit=5))
-    for call in api_calls:
-        try:
-            payloads = _extract_candidate_payloads(call())
-        except Exception:
-            payloads = []
-        picked = _pick_unique_payload(search_key, payloads)
-        if picked:
-            return picked
-    return {}
-
-
 def _query_registration_by_qixin(search_key: str) -> dict:
     """用启信宝 API 1.41 工商照面确认企业主体。"""
     logger.info("Querying Qixin API 1.41 for subject confirmation: search_key=%s", search_key[:30])
@@ -335,10 +316,8 @@ def _format_confirmed_target(
     credit_code_input: bool = False,
 ) -> str:
     source_labels = {
-        "cnbizapi": "CNBizAPI",
         "mcp": "企查查MCP",
         "coze_public_search": "Coze/公开搜索",
-        "coze_search_cnbizapi_mcp": "Coze/公开搜索",
         "coze_search_mcp": "Coze搜索+企查查MCP",
         "qixin": "启信宝 API 1.41 工商照面",
     }
@@ -369,7 +348,7 @@ def _format_confirmed_target(
 
 
 def _confirm_target_by_mcp(search_key: str) -> tuple[str, dict]:
-    """MCP 主体确认兼容函数。当前默认主体确认链路不再主动调用。"""
+    """MCP 主体确认回退函数。"""
     logger.info("Querying QCC MCP for subject confirmation: search_key=%s", search_key[:30])
     mcp_data = _query_registration_by_mcp(search_key)
     if mcp_data:
@@ -379,37 +358,12 @@ def _confirm_target_by_mcp(search_key: str) -> tuple[str, dict]:
     return "", {}
 
 
-def _confirm_target_by_cnbizapi(search_key: str) -> tuple[str, dict]:
-    """CNBizAPI 主体确认兼容函数。当前默认主体确认链路不再主动调用。"""
-    cnbizapi_data = _query_registration_by_cnbizapi(search_key)
-    if cnbizapi_data:
-        return "cnbizapi", _build_enriched_candidate(_extract_enterprise_name(cnbizapi_data) or search_key, cnbizapi_data)
-    return "", {}
-
-
 def _confirm_target_by_openapi(search_key: str) -> tuple[str, dict]:
     """兼容旧函数名：企业主体确认优先使用启信宝 API 1.41 工商照面。"""
     api_data = _query_registration_by_qixin(search_key)
     if api_data:
         return "qixin", _build_enriched_candidate(_extract_enterprise_name(api_data) or search_key, api_data)
     return "", {}
-
-
-def _enrich_candidates_by_cnbizapi(candidates: list[dict]) -> list[dict]:
-    enriched_candidates = []
-    for cand in candidates[:6]:
-        name = cand["企业名称"]
-        try:
-            payloads = _extract_candidate_payloads(query_company_basic(name))
-            cnbizapi_data = _pick_unique_payload(name, payloads)
-            enriched = _build_enriched_candidate(name, cnbizapi_data)
-            if cnbizapi_data and (enriched.get("登记状态") or enriched.get("统一社会信用代码")):
-                enriched_candidates.append(enriched)
-            else:
-                enriched_candidates.append(cand)
-        except Exception:
-            enriched_candidates.append(cand)
-    return enriched_candidates
 
 
 def _enrich_candidates_by_mcp(candidates: list[dict]) -> list[dict]:
