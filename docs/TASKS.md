@@ -27,6 +27,9 @@
 - [x] 更新报告摘要口径。
 - [x] 更新 Agent 提示词，明确企查查 OpenAPI 已整体退出。
 - [x] 更新 README 和技术文档到当前数据源策略。
+- [x] 同步文档口径：`standard` 固定公开搜索 `industry/basic/finance/development`，`gsxt/gsxt_risk` 仅在 `deep` 模式固定带出。
+- [x] 同步文档口径：`generate_enterprise_report` 在缺少 `qcc_data_json` 时不会自动回查企查查 MCP，只基于现有 `scoring_json` 和已传入数据生成报告。
+- [x] 删除 CNBizAPI 兼容代码和相关文档口径，不再保留该备用链路。
 
 ## 启信宝白名单
 
@@ -41,6 +44,8 @@
 - [ ] 验证企查查 MCP 额度不足时不再尝试企查查 OpenAPI。
 - [x] `qcc_data_json` 已补充 `field_sources` / `source_conflicts` 字段，便于报告复用、字段来源追踪和冲突提示。
 - [x] 已补充 `tests/test_evidence_diagnostics.py`，覆盖采集诊断、字段来源和来源冲突逻辑。
+- [ ] 在 Coze 环境验证 `standard` 模式默认不固定追加 `gsxt/gsxt_risk`，仅 `deep` 模式固定带出。
+- [ ] 在 Coze 环境验证未传 `qcc_data_json` 时，报告阶段不会自动回查企查查 MCP。
 - [ ] 验证启信宝接口 `32.1` 的“地产行政处罚”在报告中不会被误写成通用行政处罚。
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
 
@@ -57,4 +62,6 @@ git diff --check
 - `qcc_data_json` 是兼容字段名，短期不建议改名，否则需要同步更新 Agent prompt、报告工具和 Coze 配置。
 - `collection_diagnostics` 是诊断摘要，不是评分证据本身；Agent 应优先把它当作采集健康度和是否需要人工复核的提示。
 - 启信宝 `1.31` 模糊搜索目前主要用于固定采集，后续可考虑纳入主体消歧增强。
+- `standard` 模式当前固定公开搜索 `industry/basic/finance/development`，`gsxt` 相关线索属于 `deep` 固定链路或 Agent 按需补查，不应在文档中写成默认必查。
+- 报告阶段当前是“复用已采集数据”模式；如果 `collect_enterprise_evidence` 没有传出 `qcc_data_json`，报告会继续生成，但不会再自动补查 MCP。
 - 启信宝接口字段结构需要在真实 Coze 环境用生产凭据验证。

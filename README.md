@@ -8,8 +8,7 @@
 
 - 启信宝 API 是主结构化数据源。
 - 企查查 MCP 保留为补充数据源，仅用于启信宝白名单未覆盖字段、缺失字段补查、核心风险核验或 deep 尽调。
-- 企查查 OpenAPI 已整体退出，相关客户端和 Agent 工具已移除，不再作为兜底渠道。
-- CNBizAPI 客户端保留兼容，但默认固定采集链路不依赖 CNBizAPI，也不参与主体确认。
+- 当前结构化采集链路仅使用启信宝 API 和企查查 MCP。
 
 启信宝 API 仅允许调用以下接口 ID：
 
@@ -19,7 +18,7 @@
 
 - 根据用户输入的企业名称或统一社会信用代码，先通过 `collect_enterprise_evidence` 完成主体确认和固定证据采集。
 - 主体确认优先使用启信宝 API `1.41` 工商照面；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。
-- 主体确认后按分层策略采集启信宝白名单接口数据：standard 默认先查主体、核心风险和关键资质，deep 再扩展到资产负担、土地和案件串联；同时调用公开搜索、国家企业信用信息公示系统搜索，并在启信宝不可用或关键字段缺失时自动提升企查查 MCP 补位。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
+- 主体确认后按分层策略采集启信宝白名单接口数据：standard 默认先查主体、核心风险和关键资质，并固定补充公开搜索中的行业、工商、财务和发展线索；deep 才进一步扩展到国家企业信用信息公示系统线索、资产负担、土地和案件串联。若启信宝不可用或关键字段缺失较多，standard 会自动提升企查查 MCP 做基础工商/风险/财务补位。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
 - 按行业、企业经营、财务、信用四个维度评分。
 - 输出企业分析结论、数据可信度、财务缺失说明、重点风险和行动建议，并通过 Coze 文档服务生成 PDF 报告链接。
 
@@ -50,6 +49,8 @@ QIXIN_APPKEY=...
 QIXIN_SECRET_KEY=...
 QIXIN_AUTH_VERSION=2.0
 QIXIN_CACHE_TTL_SECONDS=259200
+QIXIN_PERSISTENT_CACHE_TTL_SECONDS=86400
+QIXIN_CIRCUIT_BREAKER_SECONDS=600
 QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 ```
 
@@ -59,6 +60,9 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 QCC_MCP_API_KEY=...
 QCC_MCP_API_KEY02=...
 QCC_MCP_API_KEY03=...
+QCC_MCP_API_KEY04=...
+QCC_MCP_API_KEY05=...
+QCC_MCP_API_KEY06=...
 QCC_MCP_TIMEOUT_SECONDS=20
 QCC_MCP_CACHE_TTL_SECONDS=3600
 QCC_MCP_TOOL_ALIASES={}

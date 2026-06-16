@@ -36,6 +36,22 @@ from services.qixin_openapi_client import (
     is_qixin_unavailable,
     query_qixin_by_search_key,
 )
+try:
+    from services.qixin_openapi_client import parse_qixin_result
+except ImportError:
+    def parse_qixin_result(raw_result) -> dict[str, Any]:
+        if isinstance(raw_result, dict):
+            return raw_result
+        if not isinstance(raw_result, str):
+            return {}
+        text = raw_result.strip()
+        if not text or text[0] not in "[{":
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 from services.qcc_mcp_client import (
     is_qcc_mcp_available,
     query_company_registration,
@@ -317,15 +333,6 @@ def _collect_search_evidence(enterprise_name: str, collection_mode: str = "stand
         },
         max_workers=3,
     )
-
-
-def _collect_cnbizapi_evidence(search_key: str, enterprise_name: str) -> dict:
-    """CNBizAPI 当前不进入默认固定采集，避免慢接口拖住 Coze 分析链路。"""
-    return {
-        "_collection_note": "CNBizAPI skipped by default. Current policy uses Qixin API 1.41 for subject confirmation, Qixin whitelisted APIs as primary structured data, public search for evidence, and QCC MCP only for missing fields when quota is available.",
-        "基础工商": "",
-        "企业搜索": "",
-    }
 
 
 def _collect_qixin_api_evidence(search_key: str, enterprise_name: str, collection_mode: str = "standard") -> dict:
@@ -612,7 +619,6 @@ def _build_collection_diagnostics(
     qixin_api: dict,
     qcc_mcp: dict,
     triggered_mcp: dict,
-    cnbizapi: dict,
     qcc_data_json: dict,
     collection_mode: str,
 ) -> dict:
@@ -634,8 +640,9 @@ def _build_collection_diagnostics(
         for k, v in qixin_api.items():
             if k.startswith("_"):
                 continue
-            if isinstance(v, dict):
-                cache_src = v.get("_cache_source", "")
+            parsed_value = v if isinstance(v, dict) else parse_qixin_result(v)
+            if isinstance(parsed_value, dict):
+                cache_src = parsed_value.get("_cache_source", "")
                 if cache_src == "memory":
                     memory_cache = True
                 elif cache_src == "persistent":
@@ -654,7 +661,7 @@ def _build_collection_diagnostics(
         short = src.split(".")[0] if "." in src else src
         source_counts[short] = source_counts.get(short, 0) + 1
 
-    missing_fields = [k for k, v in qcc_data_json.items() if k not in ("field_sources", "source_conflicts", "provider", "qixin_api", "cnbizapi_basic", "cnbizapi_search", "qixin_basic", "qixin_fuzzy_search", "qixin_tech_enterprise", "qixin_equity_penetration", "qixin_qualification", "qixin_land_purchase", "qixin_case_relation", "qixin_real_estate_admin_penalty", "history_risk") and _is_unknown_or_error(v)]
+    missing_fields = [k for k, v in qcc_data_json.items() if k not in ("field_sources", "source_conflicts", "provider", "qixin_api", "qixin_basic", "qixin_fuzzy_search", "qixin_tech_enterprise", "qixin_equity_penetration", "qixin_qualification", "qixin_land_purchase", "qixin_case_relation", "qixin_real_estate_admin_penalty", "history_risk") and _is_unknown_or_error(v)]
     missing_count = len(missing_fields)
 
     conflicts = qcc_data_json.get("source_conflicts", [])
@@ -699,7 +706,6 @@ def _build_collection_diagnostics(
 
 def _build_evidence_summary(
     identity: dict,
-    cnbizapi: dict,
     qixin_api: dict,
     search_evidence: dict,
     qcc_mcp: dict,
@@ -713,7 +719,7 @@ def _build_evidence_summary(
     operation = qcc_mcp.get("operation", {})
     risk_keys = ("失信被执行人", "行政处罚", "经营异常", "严重违法失信", "限制高消费")
     missing_or_unknown = []
-    for group_name, group in (("cnbizapi", cnbizapi), ("qixin_api", qixin_api), ("basic", basic), ("finance", finance), ("risk", risk), ("operation", operation)):
+    for group_name, group in (("qixin_api", qixin_api), ("basic", basic), ("finance", finance), ("risk", risk), ("operation", operation)):
         for key, value in group.items():
             if key == "_meta":
                 continue
@@ -734,7 +740,6 @@ def _build_evidence_summary(
             "serious_violation_56_1": _shorten(qixin_api.get("严重违法(API 56.1)", "")),
             "tax_environment": _shorten(qixin_api.get("欠税信息(API 20.1)", "") or qixin_api.get("环保处罚(API 51.1)", "")),
         },
-        "cnbizapi_basic": _shorten(cnbizapi.get("基础工商", "")),
         "qcc_registration": _shorten(basic.get("工商登记", "")),
         "core_risks": {key: _shorten(risk.get(key, "")) for key in risk_keys},
         "finance": _shorten(finance.get("财务数据", "")),
@@ -906,7 +911,6 @@ def _collect_qcc_mcp_evidence(search_key: str, collection_mode: str = "standard"
 
 def _build_qcc_data_json(
     qcc_mcp: dict,
-    cnbizapi: dict | None = None,
     qixin_api: dict | None = None,
     triggered_mcp: dict | None = None,
 ) -> dict:
@@ -914,7 +918,6 @@ def _build_qcc_data_json(
 
     参数名继续保留 qcc_data_json 以兼容报告工具，但主结构化来源已切换为启信宝 API。
     """
-    cnbizapi = cnbizapi or {}
     qixin_api = qixin_api or {}
     triggered_mcp = triggered_mcp or {}
     extended_risk = qcc_mcp.get("extended_risk", {})
@@ -967,9 +970,7 @@ def _build_qcc_data_json(
     return {
         "provider": "qixin_primary_qcc_mcp_fallback",
         "qixin_api": qixin_api,
-        "registration": _assign("registration", ("qixin_api_1_41", qixin_api.get("工商照面(API 1.41)", "")), ("cnbizapi_basic", cnbizapi.get("基础工商", "")), ("qcc_mcp_basic.registration", basic.get("工商登记", ""))),
-        "cnbizapi_basic": cnbizapi.get("基础工商", ""),
-        "cnbizapi_search": cnbizapi.get("企业搜索", ""),
+        "registration": _assign("registration", ("qixin_api_1_41", qixin_api.get("工商照面(API 1.41)", "")), ("qcc_mcp_basic.registration", basic.get("工商登记", ""))),
         "qixin_basic": qixin_api.get("工商照面(API 1.41)", ""),
         "qixin_fuzzy_search": qixin_api.get("企业模糊搜索(API 1.31)", ""),
         "qixin_tech_enterprise": qixin_api.get("科技型企业(API 79.14)", ""),
@@ -1077,13 +1078,6 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         _progress_event("public_search", "completed", collection_started_at, "公开搜索资料采集完成")
     )
     progress.append(
-        _progress_event("cnbizapi", "skipped", collection_started_at, "CNBizAPI 默认跳过，避免慢接口拖住分析；主体确认已优先使用启信宝 API 1.41")
-    )
-    cnbizapi = _collect_cnbizapi_evidence(mcp_search_key, enterprise_name)
-    progress.append(
-        _progress_event("cnbizapi", "skipped", collection_started_at, "CNBizAPI 已跳过")
-    )
-    progress.append(
         _progress_event("qixin_api_checks", "running", collection_started_at, "正在查询启信宝白名单 API，工商照面优先使用统一社会信用代码，其余接口使用企业全称")
     )
     qixin_api = _collect_qixin_api_evidence(api_search_key, enterprise_name, collection_mode)
@@ -1121,17 +1115,16 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         _progress_event("normalize_evidence", "running", collection_started_at, "正在压缩证据字段并整理报告可复用数据")
     )
     search_evidence = _truncate_evidence_value(search_evidence)
-    cnbizapi = _truncate_evidence_value(cnbizapi)
     qixin_api = _truncate_evidence_value(qixin_api)
     qcc_mcp = _truncate_evidence_value(qcc_mcp)
     triggered_mcp = _truncate_evidence_value(triggered_mcp)
     evidence_summary = _truncate_evidence_value(
-        _build_evidence_summary(identity, cnbizapi, qixin_api, search_evidence, qcc_mcp, triggered_mcp, collection_mode),
+        _build_evidence_summary(identity, qixin_api, search_evidence, qcc_mcp, triggered_mcp, collection_mode),
         max_chars=1200,
     )
-    qcc_data_json = _truncate_evidence_value(_build_qcc_data_json(qcc_mcp, cnbizapi, qixin_api, triggered_mcp))
+    qcc_data_json = _truncate_evidence_value(_build_qcc_data_json(qcc_mcp, qixin_api, triggered_mcp))
     collection_diagnostics = _build_collection_diagnostics(
-        qixin_api, qcc_mcp, triggered_mcp, cnbizapi, qcc_data_json, collection_mode,
+        qixin_api, qcc_mcp, triggered_mcp, qcc_data_json, collection_mode,
     )
     logger.info(
         "Evidence collection completed: total_elapsed=%.1fs, qixin_hit=%d, qixin_miss=%d, "
@@ -1158,7 +1151,6 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
             "public_search_key": enterprise_name,
             "subject_confirmation_priority": "启信宝 API 1.41 工商照面优先确认企业名称和统一社会信用代码；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。",
             "qixin_api_checks": "主体确认后固定查询启信宝白名单 API；1.41 优先使用统一社会信用代码，其余接口使用确认后的企业全称。",
-            "cnbizapi_policy": "CNBizAPI 当前不进入默认固定采集，避免慢接口拖住 Coze 分析链路。",
             "qcc_mcp_search_key": mcp_search_key,
             "qcc_mcp_key_rule": "企查查 MCP 的工商登记可在启信宝 API 1.41 未命中时参与主体确认回退；其余 MCP 只在启信宝未覆盖字段、缺失核心风险、深度尽调或触发补查时使用。已取得统一社会信用代码时，MCP 查询优先使用统一社会信用代码。若未配置 Key 或当天额度耗尽，直接跳过 MCP。",
             "performance_guard": f"默认 standard 不再全量采集历史/税务环保/资产负担/司法详情；单字段证据超过 {EVIDENCE_FIELD_MAX_CHARS} 字符会截断，避免 Coze 运行阶段长时间卡顿。",
@@ -1167,7 +1159,6 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         },
         "evidence_summary": evidence_summary,
         "search_evidence": search_evidence,
-        "cnbizapi": cnbizapi,
         "qixin_api": qixin_api,
         "qcc_mcp": qcc_mcp,
         "triggered_mcp": triggered_mcp,

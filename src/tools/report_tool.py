@@ -562,7 +562,7 @@ def _ensure_kyb_review_sections(scoring_result: dict, qcc_data: dict) -> None:
 def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = "", qcc_data_json: str = "") -> str:
     """根据评分结果计算加权总分、确定评级并生成 PDF 分析报告。
     优先使用 qcc_data_json 中的启信宝主数据和企查查 MCP 补充数据来验证和修正评分。
-    如果未传入 qcc_data_json，工具会自动调用企查查MCP获取核心结构化数据。
+    如果未传入 qcc_data_json，工具不会在报告阶段自动回查企查查MCP，而是仅基于 scoring_json 和已传入数据生成报告。
 
     Args:
         enterprise_name: 企业名称
