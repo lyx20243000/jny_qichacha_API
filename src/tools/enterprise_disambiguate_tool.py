@@ -1,6 +1,7 @@
 """企业主体消歧工具 - 支持企业名称和统一社会信用代码确认目标企业"""
 
 import json
+import logging
 import re
 from langchain.tools import tool
 from coze_coding_dev_sdk import SearchClient
@@ -9,6 +10,8 @@ from coze_coding_utils.log.write_log import request_context
 from services.qcc_mcp_client import query_company_registration
 from services.qixin_openapi_client import query_qixin_basic
 from services.cnbizapi_client import query_company_basic, query_company_search
+
+logger = logging.getLogger(__name__)
 
 
 USCC_PATTERN = re.compile(r"^[0-9A-Z]{18}$")
@@ -305,17 +308,22 @@ def _query_registration_by_cnbizapi(search_key: str) -> dict:
 
 def _query_registration_by_qixin(search_key: str) -> dict:
     """用启信宝 API 1.41 工商照面确认企业主体。"""
+    logger.info("Querying Qixin API 1.41 for subject confirmation: search_key=%s", search_key[:30])
     api_calls = [
         lambda: query_qixin_basic(search_key),
     ]
     for call in api_calls:
         try:
             payloads = _extract_candidate_payloads(call())
-        except Exception:
+        except Exception as e:
+            logger.warning("Qixin API 1.41 call failed: %s", str(e)[:100])
             payloads = []
         picked = _pick_unique_payload(search_key, payloads)
         if picked:
+            logger.info("Qixin API 1.41 matched: name=%s", picked.get("企业名称", "")[:30])
             return picked
+        else:
+            logger.info("Qixin API 1.41 no match: search_key=%s, payload_count=%d", search_key[:30], len(payloads))
     return {}
 
 
@@ -362,9 +370,12 @@ def _format_confirmed_target(
 
 def _confirm_target_by_mcp(search_key: str) -> tuple[str, dict]:
     """MCP 主体确认兼容函数。当前默认主体确认链路不再主动调用。"""
+    logger.info("Querying QCC MCP for subject confirmation: search_key=%s", search_key[:30])
     mcp_data = _query_registration_by_mcp(search_key)
     if mcp_data:
+        logger.info("QCC MCP matched: name=%s", mcp_data.get("企业名称", "")[:30])
         return "mcp", _build_enriched_candidate(_extract_enterprise_name(mcp_data) or search_key, mcp_data)
+    logger.info("QCC MCP no match: search_key=%s", search_key[:30])
     return "", {}
 
 

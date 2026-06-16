@@ -3,6 +3,7 @@
 将24个细分工具合并为6个核心维度工具，降低LLM选择负担
 """
 import json
+import logging
 from langchain.tools import tool
 from services.qcc_mcp_client import (
     is_qcc_mcp_available,
@@ -56,18 +57,25 @@ from services.qcc_mcp_client import (
 
 QCC_MCP_QUOTA_MESSAGE = "企查查MCP积分余额不足，本项已跳过；请优先使用Coze搜索/公开搜索，并复用启信宝白名单API已采集结果。"
 
+logger = logging.getLogger(__name__)
+
 
 def _safe_call(func, search_key: str) -> str:
     """安全调用，捕获异常避免单个查询失败导致整体中断。额度轮换由 MCP 客户端统一维护。"""
     if not is_qcc_mcp_available():
+        logger.warning("QCC MCP not available (no key or quota exhausted), skipping: func=%s", func.__name__)
         return QCC_MCP_QUOTA_MESSAGE
     try:
         result = func(search_key)
         if is_qcc_mcp_quota_error(result):
+            logger.warning("QCC MCP quota exhausted: func=%s, search_key=%s", func.__name__, search_key[:20])
             return QCC_MCP_QUOTA_MESSAGE
+        if not result:
+            logger.debug("QCC MCP no data: func=%s, search_key=%s", func.__name__, search_key[:20])
         return result if result else "无数据"
     except Exception as e:
         error = str(e)
+        logger.error("QCC MCP call failed: func=%s, search_key=%s, error=%s", func.__name__, search_key[:20], error[:100])
         if is_qcc_mcp_quota_error(error):
             return QCC_MCP_QUOTA_MESSAGE
         return f"查询失败: {error}"

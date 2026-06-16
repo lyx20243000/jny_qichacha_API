@@ -5,11 +5,14 @@
 """
 
 import json
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from typing import Any
 from langchain.tools import tool
+
+logger = logging.getLogger(__name__)
 
 from tools.enterprise_disambiguate_tool import (
     _confirm_target_by_mcp,
@@ -135,12 +138,17 @@ def _confirmed_identity(source: str, target: dict, match_reason: str) -> dict:
 
 def _confirm_target_with_fallback(search_key: str) -> tuple[str, dict]:
     """主体确认优先启信宝，未命中时回退到企查查 MCP。"""
+    logger.info("Subject confirmation: search_key=%s, trying Qixin API 1.41 first", search_key[:20])
     source, target = _confirm_target_by_openapi(search_key)
     if target:
+        logger.info("Subject confirmed by Qixin API: name=%s", target.get("企业名称", "")[:30])
         return source, target
+    logger.info("Qixin API 1.41 not matched, falling back to QCC MCP: search_key=%s", search_key[:20])
     source, target = _confirm_target_by_mcp(search_key)
     if target:
+        logger.info("Subject confirmed by QCC MCP: name=%s", target.get("企业名称", "")[:30])
         return source, target
+    logger.warning("Subject not confirmed by any channel: search_key=%s", search_key[:20])
     return "", {}
 
 
@@ -1023,6 +1031,10 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
     """
     collection_mode = _normalize_collection_mode(collection_mode)
     collection_started_at = time.monotonic()
+    logger.info(
+        "collect_enterprise_evidence started: user_input=%s, collection_mode=%s",
+        user_input[:30], collection_mode,
+    )
     progress = [
         _progress_event("subject_identity", "running", collection_started_at, f"正在确认企业名称和统一社会信用代码，采集模式={collection_mode}")
     ]
@@ -1036,11 +1048,21 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         )
     )
     if identity.get("status") != "confirmed":
+        logger.warning(
+            "Subject identity not confirmed: status=%s, message=%s",
+            identity.get("status"), identity.get("message", "")[:80],
+        )
         return json.dumps({"identity": identity, "collection_progress": progress}, ensure_ascii=False)
 
     enterprise_name = identity["enterprise_name"]
     api_search_key = identity.get("unified_social_credit_code") or identity.get("mcp_search_key") or enterprise_name
     mcp_search_key = api_search_key
+    logger.info(
+        "Subject confirmed: name=%s, credit_code=%s, match_source=%s",
+        enterprise_name[:30],
+        identity.get("unified_social_credit_code", "")[:18],
+        identity.get("match_source", ""),
+    )
     progress.append(
         _progress_event("public_search", "running", collection_started_at, f"正在采集公开搜索、官方公示和行业资料，模式={collection_mode}")
     )
@@ -1059,6 +1081,14 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         _progress_event("qixin_api_checks", "running", collection_started_at, "正在查询启信宝白名单 API，工商照面优先使用统一社会信用代码，其余接口使用企业全称")
     )
     qixin_api = _collect_qixin_api_evidence(api_search_key, enterprise_name, collection_mode)
+    qixin_hit = sum(1 for k in qixin_api if k not in ("_meta", "_fatal_error", "_collection_note") and not _is_unknown_or_error(qixin_api.get(k)))
+    qixin_miss = sum(1 for k in qixin_api if k not in ("_meta", "_fatal_error", "_collection_note") and _is_unknown_or_error(qixin_api.get(k)))
+    logger.info(
+        "Qixin API collection done: hit=%d, miss=%d, fatal=%s, stopped_early=%s",
+        qixin_hit, qixin_miss,
+        bool(qixin_api.get("_fatal_error")) if isinstance(qixin_api, dict) else False,
+        qixin_api.get("_meta", {}).get("stopped_early", False) if isinstance(qixin_api, dict) else False,
+    )
     progress.append(
         _progress_event("qixin_api_checks", "completed", collection_started_at, "启信宝白名单 API 查询完成")
     )
@@ -1096,6 +1126,16 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
     qcc_data_json = _truncate_evidence_value(_build_qcc_data_json(qcc_mcp, cnbizapi, qixin_api, triggered_mcp))
     collection_diagnostics = _build_collection_diagnostics(
         qixin_api, qcc_mcp, triggered_mcp, cnbizapi, qcc_data_json, collection_mode,
+    )
+    logger.info(
+        "Evidence collection completed: total_elapsed=%.1fs, qixin_hit=%d, qixin_miss=%d, "
+        "mcp_groups=%s, missing_fields=%d, needs_review=%s",
+        time.monotonic() - collection_started_at,
+        collection_diagnostics.get("qixin", {}).get("hit_count", 0),
+        collection_diagnostics.get("qixin", {}).get("miss_count", 0),
+        collection_diagnostics.get("qcc_mcp", {}).get("collected_groups", []),
+        collection_diagnostics.get("missing_or_unknown_fields_count", 0),
+        collection_diagnostics.get("needs_human_review", False),
     )
     progress.append(
         _progress_event("normalize_evidence", "completed", collection_started_at, "证据整理完成，AI 可进入评分和报告生成")

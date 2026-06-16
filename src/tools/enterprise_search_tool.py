@@ -1,19 +1,26 @@
 """企业信息搜索工具 - 通过联网搜索获取企业公开信息（免费渠道）"""
 
+import logging
 from langchain.tools import tool
 from coze_coding_dev_sdk import SearchClient
 from coze_coding_utils.runtime_ctx.context import new_context
 from coze_coding_utils.log.write_log import request_context
 
+logger = logging.getLogger(__name__)
+
 
 def _do_web_search(query: str, count: int = 10) -> str:
     """执行联网搜索的公共逻辑"""
+    logger.info("Web search: query=%s, count=%d", query[:50], count)
     ctx = request_context.get() or new_context(method="enterprise_search")
     client = SearchClient(ctx=ctx)
     response = client.web_search(query=query, count=count, need_summary=True)
 
     if not response.web_items:
+        logger.info("Web search no results: query=%s", query[:50])
         return f"未找到与「{query}」相关的搜索结果。"
+
+    logger.info("Web search returned %d results: query=%s", len(response.web_items), query[:50])
 
     results = []
     for i, item in enumerate(response.web_items, 1):
