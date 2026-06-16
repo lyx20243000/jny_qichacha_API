@@ -38,6 +38,7 @@ _load_local_env()
 
 QIXIN_APPKEY = os.getenv("QIXIN_APPKEY", os.getenv("QIXIN_OPENAPI_APPKEY", ""))
 QIXIN_SECRET_KEY = os.getenv("QIXIN_SECRET_KEY", os.getenv("QIXIN_OPENAPI_SECRET_KEY", ""))
+QIXIN_AUTH_VERSION = os.getenv("QIXIN_AUTH_VERSION", "2.0")
 
 # ===== 启动诊断日志：部署后通过生产日志确认启信宝配置状态 =====
 if QIXIN_APPKEY and QIXIN_SECRET_KEY:
@@ -52,7 +53,6 @@ else:
         "set" if QIXIN_APPKEY else "missing",
         "set" if QIXIN_SECRET_KEY else "missing",
     )
-QIXIN_AUTH_VERSION = os.getenv("QIXIN_AUTH_VERSION", "2.0")
 try:
     QIXIN_CACHE_TTL_SECONDS = int(os.getenv("QIXIN_CACHE_TTL_SECONDS", "259200"))
 except ValueError:
