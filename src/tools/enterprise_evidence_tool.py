@@ -626,13 +626,13 @@ def _build_collection_diagnostics(
     qixin_hit = sum(1 for k in qixin_api_keys if not _is_unknown_or_error(qixin_api.get(k)))
     qixin_miss = sum(1 for k in qixin_api_keys if _is_unknown_or_error(qixin_api.get(k)))
 
+    # 检查启信宝 API 返回中是否有缓存命中标记（由 qixin_openapi_client 添加）
     persisted_cache = False
     if isinstance(qixin_api, dict):
         for k, v in qixin_api.items():
-            if isinstance(v, str) and "persistent cache" in v.lower():
-                persisted_cache = True
-                break
-            if isinstance(v, dict) and str(v.get("source", "")).lower().startswith("persistent"):
+            if k.startswith("_"):
+                continue
+            if isinstance(v, dict) and v.get("_cache_source") == "persistent":
                 persisted_cache = True
                 break
 

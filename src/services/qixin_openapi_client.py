@@ -478,6 +478,14 @@ def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: 
     cached = _get_cached(key)
     if cached is not None:
         logger.info("Qixin API cache hit: api_id=%s", api_id)
+        # 在返回值中标记缓存命中，供采集诊断使用
+        try:
+            cached_data = json.loads(cached)
+            if isinstance(cached_data, dict):
+                cached_data["_cache_source"] = "persistent"
+                return json.dumps(cached_data, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            pass
         return cached
 
     try:
