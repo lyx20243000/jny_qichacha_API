@@ -19,8 +19,11 @@
 - [x] 删除旧企查查 OpenAPI 客户端 `src/services/qcc_openapi_client.py`。
 - [x] 删除旧企查查 OpenAPI 工具 `src/tools/enterprise_api_tool.py`。
 - [x] 更新主体消歧工具，改用启信宝 API 基础信息结果。
+- [x] 主体确认增加企查查 MCP 回退链路，作为启信宝 API `1.41` 不可用时的备份。
 - [x] 更新固定证据采集工具，返回 `qixin_api` 数据。
 - [x] 保留 `qcc_data_json` 参数名以兼容报告工具，内部数据改为“启信宝主源 + 企查查 MCP 补充”。
+- [x] `collect_enterprise_evidence` 已增加 `collection_diagnostics`，输出熔断、补位、缺失字段和来源冲突摘要。
+- [x] `qcc_data_json` 已补充 `field_sources` 和 `source_conflicts`，便于报告复用、字段来源追踪和人工复核。
 - [x] 更新报告摘要口径。
 - [x] 更新 Agent 提示词，明确企查查 OpenAPI 已整体退出。
 - [x] 更新 README 和技术文档到当前数据源策略。
@@ -34,9 +37,10 @@
 - [ ] 在 Coze 环境配置 `QIXIN_APPKEY` 和 `QIXIN_SECRET_KEY`。
 - [ ] 在 Coze 环境验证企业名称输入时优先命中启信宝 API `1.41`。
 - [ ] 在 Coze 环境验证统一社会信用代码输入时优先命中启信宝 API `1.41`。
-- [ ] 验证 `collect_enterprise_evidence` 返回 `qixin_api`、`qcc_mcp` 和兼容字段 `qcc_data_json`。
+- [x] `collect_enterprise_evidence` 已增加启信宝分层采集、不可用熔断和 standard 模式 MCP 自动补位逻辑。
 - [ ] 验证企查查 MCP 额度不足时不再尝试企查查 OpenAPI。
-- [ ] 验证报告工具能复用 `qcc_data_json`，减少报告阶段重复 MCP 查询。
+- [x] `qcc_data_json` 已补充 `field_sources` / `source_conflicts` 字段，便于报告复用、字段来源追踪和冲突提示。
+- [x] 已补充 `tests/test_evidence_diagnostics.py`，覆盖采集诊断、字段来源和来源冲突逻辑。
 - [ ] 验证启信宝接口 `32.1` 的“地产行政处罚”在报告中不会被误写成通用行政处罚。
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
 
@@ -51,5 +55,6 @@ git diff --check
 ## 风险提示
 
 - `qcc_data_json` 是兼容字段名，短期不建议改名，否则需要同步更新 Agent prompt、报告工具和 Coze 配置。
+- `collection_diagnostics` 是诊断摘要，不是评分证据本身；Agent 应优先把它当作采集健康度和是否需要人工复核的提示。
 - 启信宝 `1.31` 模糊搜索目前主要用于固定采集，后续可考虑纳入主体消歧增强。
 - 启信宝接口字段结构需要在真实 Coze 环境用生产凭据验证。

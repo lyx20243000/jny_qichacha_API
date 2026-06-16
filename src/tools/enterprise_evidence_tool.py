@@ -1,6 +1,6 @@
 """固定企业证据采集工具。
 
-先用启信宝 API 确认企业主体，再按采集模式采集公开搜索、启信宝白名单接口和必要的企查查 MCP 补缺数据，
+先用启信宝 API 确认企业主体，未命中时回退到企查查 MCP，再按采集模式采集公开搜索、启信宝白名单接口和必要的企查查 MCP 补缺数据，
 让 AI 只负责解读、评分和生成报告。
 """
 
@@ -8,9 +8,11 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from typing import Any
 from langchain.tools import tool
 
 from tools.enterprise_disambiguate_tool import (
+    _confirm_target_by_mcp,
     _confirm_target_by_openapi,
     _do_candidate_search,
     _extract_company_names,
@@ -26,7 +28,11 @@ from tools.enterprise_disambiguate_tool import (
 )
 from tools.enterprise_search_tool import _do_web_search
 from tools.qcc_mcp_tool import _safe_call
-from services.qixin_openapi_client import query_qixin_by_search_key
+from services.qixin_openapi_client import (
+    get_qixin_error_info,
+    is_qixin_unavailable,
+    query_qixin_by_search_key,
+)
 from services.qcc_mcp_client import (
     is_qcc_mcp_available,
     query_company_registration,
@@ -127,14 +133,27 @@ def _confirmed_identity(source: str, target: dict, match_reason: str) -> dict:
     )
 
 
+def _confirm_target_with_fallback(search_key: str) -> tuple[str, dict]:
+    """主体确认优先启信宝，未命中时回退到企查查 MCP。"""
+    source, target = _confirm_target_by_openapi(search_key)
+    if target:
+        return source, target
+    source, target = _confirm_target_by_mcp(search_key)
+    if target:
+        return source, target
+    return "", {}
+
+
 def _confirm_enterprise_identity(user_input: str) -> dict:
-    """固定主体确认：企业名称和统一社会信用代码均优先使用启信宝 API 1.41。"""
+    """固定主体确认：启信宝 API 1.41 优先，未命中时回退到企查查 MCP。"""
     normalized_code = _normalize_social_credit_code(user_input)
     if _is_social_credit_code(user_input):
-        source, target = _confirm_target_by_openapi(normalized_code)
+        source, target = _confirm_target_with_fallback(normalized_code)
         if target:
             if not _is_social_credit_code(target.get("统一社会信用代码", "")):
                 target["统一社会信用代码"] = normalized_code
+            if source == "mcp":
+                return _confirmed_identity(source, target, "统一社会信用代码经企查查 MCP 在启信宝 API 1.41 未命中后确认")
             return _confirmed_identity(source, target, "统一社会信用代码经启信宝 API 1.41 工商照面优先确认")
 
         debug_trace = [
@@ -143,7 +162,16 @@ def _confirm_enterprise_identity(user_input: str) -> dict:
                 "matched": False,
                 "source": "qixin",
                 "skipped": False,
-                "reason": "用户输入为统一社会信用代码，已优先调用启信宝 API 1.41，但未确认主体，继续使用 Coze/公开搜索兜底。",
+                "reason": "用户输入为统一社会信用代码，已优先调用启信宝 API 1.41，但未确认主体。",
+                "enterprise_name": "",
+                "credit_code": normalized_code,
+            },
+            {
+                "channel": "qcc_mcp_registration",
+                "matched": False,
+                "source": "mcp",
+                "skipped": not is_qcc_mcp_available(),
+                "reason": "启信宝 API 1.41 未命中后尝试企查查 MCP 主体确认；若未命中或不可用，再继续使用 Coze/公开搜索兜底。",
                 "enterprise_name": "",
                 "credit_code": normalized_code,
             }
@@ -178,20 +206,24 @@ def _confirm_enterprise_identity(user_input: str) -> dict:
         return _identity_result(
             "not_found",
             input=user_input,
-            message="统一社会信用代码未能确认对应企业。该结果表示启信宝 API 1.41 和公开搜索均未返回可解析主体；请查看 debug_trace 判断启信宝或搜索候选是否缺失。",
+            message="统一社会信用代码未能确认对应企业。该结果表示启信宝 API 1.41、企查查 MCP 和公开搜索均未返回可解析主体；请查看 debug_trace 判断各通道是否缺失。",
             candidates=[],
             debug_trace=debug_trace,
         )
 
     if not _is_probably_short_name(user_input):
-        source, target = _confirm_target_by_openapi(user_input)
+        source, target = _confirm_target_with_fallback(user_input)
         if target:
+            if source == "mcp":
+                return _confirmed_identity(source, target, "企业名称经企查查 MCP 在启信宝 API 1.41 未命中后确认")
             return _confirmed_identity(source, target, "企业名称经启信宝 API 1.41 工商照面优先确认")
 
         stripped_input = _strip_admin_prefix(user_input)
         if stripped_input and stripped_input != user_input:
-            source, target = _confirm_target_by_openapi(stripped_input)
+            source, target = _confirm_target_with_fallback(stripped_input)
             if target:
+                if source == "mcp":
+                    return _confirmed_identity(source, target, "企业名称去省份/地区前缀后经企查查 MCP 在启信宝 API 1.41 未命中后确认")
                 return _confirmed_identity(source, target, "企业名称去省份/地区前缀后经启信宝 API 1.41 工商照面优先确认")
 
     search_query = f'"{user_input}" 公司 工商信息 企业名称'
@@ -288,36 +320,89 @@ def _collect_cnbizapi_evidence(search_key: str, enterprise_name: str) -> dict:
     }
 
 
-def _collect_qixin_api_evidence(search_key: str, enterprise_name: str) -> dict:
-    """固定补充启信宝白名单 API，每个接口查询一次。"""
+def _collect_qixin_api_evidence(search_key: str, enterprise_name: str, collection_mode: str = "standard") -> dict:
+    """按模式补充启信宝白名单 API，优先核心字段，异常时及时熔断降级。"""
     q = search_key or enterprise_name
-    calls = {
+    p0_calls = {
         "工商照面(API 1.41)": lambda: query_qixin_by_search_key("1.41", q, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "企业模糊搜索(API 1.31)": lambda: query_qixin_by_search_key("1.31", q, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
+    }
+    p1_calls = {
         "科技型企业(API 79.14)": lambda: query_qixin_by_search_key("79.14", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "股权穿透(API 55.2)": lambda: query_qixin_by_search_key("55.2", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "企业资质(API 22.1)": lambda: query_qixin_by_search_key("22.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
-        "购地信息(API 61.1)": lambda: query_qixin_by_search_key("61.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "失信被执行(API 5.5)": lambda: query_qixin_by_search_key("5.5", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "被执行企业(API 17.5)": lambda: query_qixin_by_search_key("17.5", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "限制高消费(API 66.1)": lambda: query_qixin_by_search_key("66.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
-        "案件串联(API 85.71)": lambda: query_qixin_by_search_key("85.71", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
-        "地产行政处罚(API 32.1)": lambda: query_qixin_by_search_key("32.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "经营异常(API 1.55)": lambda: query_qixin_by_search_key("1.55", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "严重违法(API 56.1)": lambda: query_qixin_by_search_key("56.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "环保处罚(API 51.1)": lambda: query_qixin_by_search_key("51.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
-        "非正常户(API 63.2)": lambda: query_qixin_by_search_key("63.2", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "欠税信息(API 20.1)": lambda: query_qixin_by_search_key("20.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "重大税收违法(API 20.3)": lambda: query_qixin_by_search_key("20.3", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
+    }
+    p2_calls = {
+        "购地信息(API 61.1)": lambda: query_qixin_by_search_key("61.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
+        "案件串联(API 85.71)": lambda: query_qixin_by_search_key("85.71", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
+        "地产行政处罚(API 32.1)": lambda: query_qixin_by_search_key("32.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
+        "非正常户(API 63.2)": lambda: query_qixin_by_search_key("63.2", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "股权出质(API 26.1)": lambda: query_qixin_by_search_key("26.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "股权冻结(API 34.1)": lambda: query_qixin_by_search_key("34.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
         "动产抵押(API 25.1)": lambda: query_qixin_by_search_key("25.1", enterprise_name, timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS),
     }
-    result = _run_named_calls(calls, max_workers=5, item_timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS, group_timeout=35)
-    result["_collection_note"] = (
-        "Qixin whitelisted APIs queried once after subject confirmation; "
-        "1.41 prefers unified social credit code when available, other APIs use confirmed enterprise name."
-    )
+    stage_calls = [("p0", p0_calls), ("p1", p1_calls)]
+    if collection_mode == "deep":
+        stage_calls.append(("p2", p2_calls))
+
+    result: dict[str, Any] = {}
+    stage_meta = []
+    for stage_name, calls in stage_calls:
+        stage_result = _run_named_calls(calls, max_workers=5, item_timeout=QIXIN_API_CHECK_TIMEOUT_SECONDS, group_timeout=35)
+        stage_meta.append(
+            {
+                "stage": stage_name,
+                "apis": [key for key in calls.keys()],
+                "elapsed_seconds": stage_result.get("_meta", {}).get("elapsed_seconds", 0),
+            }
+        )
+        for key, value in stage_result.items():
+            if key != "_meta":
+                result[key] = value
+        fatal_errors = [get_qixin_error_info(value) for value in stage_result.values() if is_qixin_unavailable(value)]
+        if fatal_errors:
+            error_info = next((item for item in fatal_errors if item), {})
+            result["_collection_note"] = (
+                "Qixin collection stopped early because the provider became unavailable; "
+                "fallback sources should be preferred for the remaining fields."
+            )
+            result["_fatal_error"] = error_info
+            result["_meta"] = {
+                "collection_mode": collection_mode,
+                "stages_completed": [item["stage"] for item in stage_meta],
+                "stage_meta": stage_meta,
+                "stopped_early": True,
+            }
+            return result
+
+    if collection_mode == "standard":
+        result["_collection_note"] = (
+            "Qixin standard mode collects subject/basic/risk/core qualification fields first; "
+            "extended encumbrance and land/case details are deferred to deep mode or MCP补查."
+        )
+    elif collection_mode == "quick":
+        result["_collection_note"] = (
+            "Qixin quick mode keeps only basic subject confirmation plus core risk checks."
+        )
+    else:
+        result["_collection_note"] = (
+            "Qixin deep mode queried the approved whitelist in layered stages; "
+            "1.41 prefers unified social credit code when available, other APIs use confirmed enterprise name."
+        )
+    result["_meta"] = {
+        "collection_mode": collection_mode,
+        "stages_completed": [item["stage"] for item in stage_meta],
+        "stage_meta": stage_meta,
+        "stopped_early": False,
+    }
     return result
 
 
@@ -391,7 +476,9 @@ def _is_unknown_or_error(value) -> bool:
     text = str(value or "")
     if not text:
         return True
-    return any(keyword in text for keyword in ("错误:", "查询失败", "查询超时", "未配置", "余额不足", "积分余额不足"))
+    if isinstance(value, dict) and value.get("provider") == "qixin" and value.get("ok") is False:
+        return True
+    return any(keyword in text for keyword in ("错误:", "查询失败", "查询超时", "未配置", "余额不足", "积分余额不足", '"ok": false'))
 
 
 def _looks_like_risk(value) -> bool:
@@ -423,7 +510,40 @@ def _should_collect_operation_detail(qcc_mcp: dict, search_evidence: dict, colle
     return any(keyword in development for keyword in ("专利", "知识产权", "招聘", "中标", "荣誉", "资质", "高新", "专精特新"))
 
 
-def _collect_triggered_mcp_evidence(search_key: str, qcc_mcp: dict, search_evidence: dict, collection_mode: str) -> dict:
+def _should_collect_mcp_standard_seed(qixin_api: dict) -> bool:
+    if not qixin_api:
+        return True
+    if qixin_api.get("_fatal_error"):
+        return True
+    critical_keys = (
+        "工商照面(API 1.41)",
+        "股权穿透(API 55.2)",
+        "企业资质(API 22.1)",
+        "经营异常(API 1.55)",
+        "严重违法(API 56.1)",
+        "失信被执行(API 5.5)",
+        "被执行企业(API 17.5)",
+        "限制高消费(API 66.1)",
+        "欠税信息(API 20.1)",
+    )
+    failed = 0
+    seen = 0
+    for key in critical_keys:
+        if key not in qixin_api:
+            continue
+        seen += 1
+        if _is_unknown_or_error(qixin_api.get(key)):
+            failed += 1
+    return seen == 0 or failed >= max(3, seen // 2 + 1)
+
+
+def _collect_triggered_mcp_evidence(
+    search_key: str,
+    qcc_mcp: dict,
+    search_evidence: dict,
+    collection_mode: str,
+    qixin_api: dict | None = None,
+) -> dict:
     """按需补查重字段，避免普通评估默认全量尽调。"""
     if not is_qcc_mcp_available():
         return {
@@ -442,6 +562,7 @@ def _collect_triggered_mcp_evidence(search_key: str, qcc_mcp: dict, search_evide
         }
 
     triggered = {}
+    qixin_api = qixin_api or {}
     if _should_collect_risk_detail(qcc_mcp, collection_mode):
         triggered["法律诉讼"] = _run_named_calls(
             {
@@ -468,7 +589,7 @@ def _collect_triggered_mcp_evidence(search_key: str, qcc_mcp: dict, search_evide
         )
 
     triggered["_meta"] = {
-        "policy": "按需补查：核心风险命中时补司法/风险详情；经营证据不足时补专利/招聘/舆情。",
+        "policy": "按需补查：核心风险命中时补司法/风险详情；经营证据不足时补专利/招聘/舆情。若启信宝不可用或核心字段缺失较多，standard 模式会在主 MCP 采集中自动补位基础结构化数据。",
         "triggered_sections": [key for key in triggered.keys() if key != "_meta"],
     }
     return triggered
@@ -477,6 +598,89 @@ def _collect_triggered_mcp_evidence(search_key: str, qcc_mcp: dict, search_evide
 def _shorten(value, limit: int = 220) -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _build_collection_diagnostics(
+    qixin_api: dict,
+    qcc_mcp: dict,
+    triggered_mcp: dict,
+    cnbizapi: dict,
+    qcc_data_json: dict,
+    collection_mode: str,
+) -> dict:
+    """紧凑的采集诊断摘要，让人一眼看出数据获取健康度。"""
+    qixin_meta = qixin_api.get("_meta", {}) if isinstance(qixin_api, dict) else {}
+    qixin_fatal = qixin_api.get("_fatal_error", {}) if isinstance(qixin_api, dict) else {}
+    qixin_stages = qixin_meta.get("stages_completed", [])
+    qixin_stopped_early = qixin_meta.get("stopped_early", False)
+
+    qixin_api_keys = [k for k in qixin_api.keys() if k not in ("_meta", "_fatal_error", "_collection_note")]
+    qixin_hit = sum(1 for k in qixin_api_keys if not _is_unknown_or_error(qixin_api.get(k)))
+    qixin_miss = sum(1 for k in qixin_api_keys if _is_unknown_or_error(qixin_api.get(k)))
+
+    persisted_cache = False
+    if isinstance(qixin_api, dict):
+        for k, v in qixin_api.items():
+            if isinstance(v, str) and "persistent cache" in v.lower():
+                persisted_cache = True
+                break
+            if isinstance(v, dict) and str(v.get("source", "")).lower().startswith("persistent"):
+                persisted_cache = True
+                break
+
+    mcp_note = qcc_mcp.get("_collection_note", "")
+    mcp_seed_triggered = "promoted" in mcp_note.lower() or "seed" in mcp_note.lower()
+    mcp_groups = []
+    for group in ("basic", "finance", "risk", "extended_risk", "ip", "operation", "news"):
+        if qcc_mcp.get(group):
+            mcp_groups.append(group)
+
+    field_sources = qcc_data_json.get("field_sources", {})
+    source_counts: dict[str, int] = {}
+    for src in field_sources.values():
+        short = src.split(".")[0] if "." in src else src
+        source_counts[short] = source_counts.get(short, 0) + 1
+
+    missing_fields = [k for k, v in qcc_data_json.items() if k not in ("field_sources", "source_conflicts", "provider", "qixin_api", "cnbizapi_basic", "cnbizapi_search", "qixin_basic", "qixin_fuzzy_search", "qixin_tech_enterprise", "qixin_equity_penetration", "qixin_qualification", "qixin_land_purchase", "qixin_case_relation", "qixin_real_estate_admin_penalty", "history_risk") and _is_unknown_or_error(v)]
+    missing_count = len(missing_fields)
+
+    conflicts = qcc_data_json.get("source_conflicts", [])
+    conflict_count = len(conflicts)
+    high_risk_fields = {"registration", "dishonest", "business_exception", "serious_violation", "high_consumption"}
+    critical_conflict = any(c.get("field") in high_risk_fields for c in conflicts)
+
+    needs_review = bool(qixin_fatal) or qixin_stopped_early or missing_count >= 10 or critical_conflict
+    reasons = []
+    if qixin_fatal:
+        reasons.append("启信宝熔断")
+    if qixin_stopped_early:
+        reasons.append("启信宝提前终止")
+    if missing_count >= 10:
+        reasons.append(f"缺失字段≥10({missing_count})")
+    if critical_conflict:
+        reasons.append("核心字段来源冲突")
+
+    return {
+        "qixin": {
+            "fatal": bool(qixin_fatal),
+            "fatal_reason": (qixin_fatal.get("message", "") or qixin_fatal.get("error_msg", "")) if qixin_fatal else "",
+            "stages": qixin_stages,
+            "stopped_early": qixin_stopped_early,
+            "hit_count": qixin_hit,
+            "miss_count": qixin_miss,
+            "persisted_cache": persisted_cache,
+        },
+        "qcc_mcp": {
+            "seed_triggered": mcp_seed_triggered,
+            "collected_groups": mcp_groups,
+        },
+        "field_source_summary": source_counts,
+        "missing_or_unknown_fields_count": missing_count,
+        "source_conflict_count": conflict_count,
+        "needs_human_review": needs_review,
+        "review_reasons": reasons,
+        "collection_mode": collection_mode,
+    }
 
 
 def _build_evidence_summary(
@@ -507,7 +711,7 @@ def _build_evidence_summary(
         "enterprise_name": identity.get("enterprise_name", ""),
         "unified_social_credit_code": identity.get("unified_social_credit_code", ""),
         "match_source": identity.get("match_source", ""),
-        "priority_sources": ["启信宝API 1.41主体确认", "启信宝白名单API固定结构化采集", "国家企业信用信息公示系统/公开搜索", "企查查MCP缺失字段补查"],
+        "priority_sources": ["启信宝API 1.41主体确认", "企查查MCP主体确认回退", "启信宝白名单API固定结构化采集", "国家企业信用信息公示系统/公开搜索", "企查查MCP缺失字段补查"],
         "qixin_api_checks": {
             "basic_1_41": _shorten(qixin_api.get("工商照面(API 1.41)", "")),
             "business_exception_1_55": _shorten(qixin_api.get("经营异常(API 1.55)", "")),
@@ -531,12 +735,14 @@ def _build_evidence_summary(
             if search_evidence.get(key)
         },
         "triggered_collection": triggered_mcp.get("_meta", {}),
+        "qixin_collection_meta": qixin_api.get("_meta", {}) if isinstance(qixin_api, dict) else {},
+        "qixin_fatal_error": qixin_api.get("_fatal_error", {}) if isinstance(qixin_api, dict) else {},
         "missing_or_unknown_fields": missing_or_unknown[:20],
         "analysis_hint": "优先基于本摘要评分；只有摘要证据不足或冲突时，再读取 search_evidence/qcc_mcp/triggered_mcp 原文。",
     }
 
 
-def _collect_qcc_mcp_evidence(search_key: str, collection_mode: str = "standard") -> dict:
+def _collect_qcc_mcp_evidence(search_key: str, collection_mode: str = "standard", qixin_api: dict | None = None) -> dict:
     """固定采集企查查 MCP 证据，search_key 优先为统一社会信用代码。"""
     if not is_qcc_mcp_available():
         return {
@@ -640,6 +846,22 @@ def _collect_qcc_mcp_evidence(search_key: str, collection_mode: str = "standard"
         }
 
     if collection_mode == "standard":
+        if _should_collect_mcp_standard_seed(qixin_api or {}):
+            return {
+                "basic": _run_named_calls(basic_calls_lite),
+                "finance": _run_named_calls({"财务数据": finance_calls_all["财务数据"]}),
+                "risk": _run_named_calls(risk_calls_lite),
+                "extended_risk": {},
+                "ip": {},
+                "operation": _run_named_calls(
+                    {
+                        "资质认证": operation_calls["资质认证"],
+                        "招投标记录": operation_calls["招投标记录"],
+                    }
+                ),
+                "news": {},
+                "_collection_note": "standard mode promoted MCP seed collection because Qixin was unavailable or critical structured fields were missing.",
+            }
         return {
             "basic": {},
             "finance": {},
@@ -695,10 +917,43 @@ def _build_qcc_data_json(
     risk_detail = triggered_mcp.get("风险详情", {})
     operation_supplement = triggered_mcp.get("经营补充", {})
 
+    def _pick_with_source(*candidates):
+        for source_name, value in candidates:
+            if value not in (None, "", [], {}):
+                return value, source_name
+        return "", ""
+
+    field_sources: dict[str, str] = {}
+    source_conflicts: list[dict] = []
+
+    def _normalize_conflict_text(value) -> str:
+        text = str(value or "").strip()
+        import re
+        text = re.sub(r"\s+", "", text)
+        text = text[:120]
+        return text
+
+    def _assign(field: str, *candidates):
+        value, source_name = _pick_with_source(*candidates)
+        if source_name:
+            field_sources[field] = source_name
+        non_empty = [(sn, v) for sn, v in candidates if v not in (None, "", [], {})]
+        if len(non_empty) >= 2:
+            normalized = [_normalize_conflict_text(v) for _, v in non_empty]
+            if len(set(normalized)) > 1:
+                source_conflicts.append({
+                    "field": field,
+                    "sources": [
+                        {"source": sn, "preview": _normalize_conflict_text(v)[:80]}
+                        for sn, v in non_empty
+                    ],
+                })
+        return value
+
     return {
         "provider": "qixin_primary_qcc_mcp_fallback",
         "qixin_api": qixin_api,
-        "registration": qixin_api.get("工商照面(API 1.41)", "") or cnbizapi.get("基础工商", "") or basic.get("工商登记", ""),
+        "registration": _assign("registration", ("qixin_api_1_41", qixin_api.get("工商照面(API 1.41)", "")), ("cnbizapi_basic", cnbizapi.get("基础工商", "")), ("qcc_mcp_basic.registration", basic.get("工商登记", ""))),
         "cnbizapi_basic": cnbizapi.get("基础工商", ""),
         "cnbizapi_search": cnbizapi.get("企业搜索", ""),
         "qixin_basic": qixin_api.get("工商照面(API 1.41)", ""),
@@ -709,50 +964,52 @@ def _build_qcc_data_json(
         "qixin_land_purchase": qixin_api.get("购地信息(API 61.1)", ""),
         "qixin_case_relation": qixin_api.get("案件串联(API 85.71)", ""),
         "qixin_real_estate_admin_penalty": qixin_api.get("地产行政处罚(API 32.1)", ""),
-        "shareholder": basic.get("股东结构", ""),
-        "actual_controller": basic.get("实际控制人", ""),
-        "company_profile": basic.get("企业简介", ""),
-        "listing_info": basic.get("上市信息", ""),
-        "key_personnel": basic.get("主要人员", ""),
-        "financial": finance.get("财务数据", ""),
-        "investment": finance.get("对外投资", ""),
-        "dishonest": qixin_api.get("失信被执行(API 5.5)", "") or risk.get("失信被执行人", ""),
-        "admin_penalty": risk.get("行政处罚", ""),
-        "business_exception": qixin_api.get("经营异常(API 1.55)", "") or risk.get("经营异常", ""),
-        "serious_violation": qixin_api.get("严重违法(API 56.1)", "") or risk.get("严重违法失信", ""),
-        "high_consumption": qixin_api.get("限制高消费(API 66.1)", "") or risk.get("限制高消费", ""),
-        "risk_scan": risk.get("风险扫描", "") or risk_detail.get("风险扫描", ""),
-        "case_filing": risk.get("立案信息", "") or risk_detail.get("立案信息", ""),
-        "credit_eval": risk.get("信用评价", "") or risk_detail.get("信用评价", ""),
-        "executed_person": qixin_api.get("被执行企业(API 17.5)", "") or legal.get("被执行人", ""),
-        "judicial_documents": legal.get("裁判文书", ""),
-        "court_announcement": legal.get("法院公告", ""),
-        "final_case": legal.get("终本案件", ""),
-        "environmental_penalty": qixin_api.get("环保处罚(API 51.1)", "") or tax_environment.get("环保处罚", ""),
-        "tax_abnormal": qixin_api.get("非正常户(API 63.2)", "") or tax_environment.get("税务非正常户", ""),
-        "tax_arrears": qixin_api.get("欠税信息(API 20.1)", "") or tax_environment.get("欠税公告", ""),
-        "tax_violation": qixin_api.get("重大税收违法(API 20.3)", "") or tax_environment.get("税收违法", ""),
-        "equity_pledge": qixin_api.get("股权出质(API 26.1)", "") or asset_equity.get("股权出质", ""),
-        "equity_freeze": qixin_api.get("股权冻结(API 34.1)", "") or asset_equity.get("股权冻结", ""),
-        "chattel_mortgage": qixin_api.get("动产抵押(API 25.1)", "") or asset_equity.get("动产抵押", ""),
-        "land_mortgage": asset_equity.get("土地抵押", ""),
+        "shareholder": _assign("shareholder", ("qcc_mcp_basic.shareholder", basic.get("股东结构", ""))),
+        "actual_controller": _assign("actual_controller", ("qcc_mcp_basic.actual_controller", basic.get("实际控制人", ""))),
+        "company_profile": _assign("company_profile", ("qcc_mcp_basic.company_profile", basic.get("企业简介", ""))),
+        "listing_info": _assign("listing_info", ("qcc_mcp_basic.listing_info", basic.get("上市信息", ""))),
+        "key_personnel": _assign("key_personnel", ("qcc_mcp_basic.key_personnel", basic.get("主要人员", ""))),
+        "financial": _assign("financial", ("qcc_mcp_finance.financial", finance.get("财务数据", ""))),
+        "investment": _assign("investment", ("qcc_mcp_finance.investment", finance.get("对外投资", ""))),
+        "dishonest": _assign("dishonest", ("qixin_api_5_5", qixin_api.get("失信被执行(API 5.5)", "")), ("qcc_mcp_risk.dishonest", risk.get("失信被执行人", ""))),
+        "admin_penalty": _assign("admin_penalty", ("qcc_mcp_risk.admin_penalty", risk.get("行政处罚", ""))),
+        "business_exception": _assign("business_exception", ("qixin_api_1_55", qixin_api.get("经营异常(API 1.55)", "")), ("qcc_mcp_risk.business_exception", risk.get("经营异常", ""))),
+        "serious_violation": _assign("serious_violation", ("qixin_api_56_1", qixin_api.get("严重违法(API 56.1)", "")), ("qcc_mcp_risk.serious_violation", risk.get("严重违法失信", ""))),
+        "high_consumption": _assign("high_consumption", ("qixin_api_66_1", qixin_api.get("限制高消费(API 66.1)", "")), ("qcc_mcp_risk.high_consumption", risk.get("限制高消费", ""))),
+        "risk_scan": _assign("risk_scan", ("qcc_mcp_risk.risk_scan", risk.get("风险扫描", "")), ("qcc_mcp_triggered.risk_scan", risk_detail.get("风险扫描", ""))),
+        "case_filing": _assign("case_filing", ("qcc_mcp_risk.case_filing", risk.get("立案信息", "")), ("qcc_mcp_triggered.case_filing", risk_detail.get("立案信息", ""))),
+        "credit_eval": _assign("credit_eval", ("qcc_mcp_risk.credit_eval", risk.get("信用评价", "")), ("qcc_mcp_triggered.credit_eval", risk_detail.get("信用评价", ""))),
+        "executed_person": _assign("executed_person", ("qixin_api_17_5", qixin_api.get("被执行企业(API 17.5)", "")), ("qcc_mcp_legal.executed_person", legal.get("被执行人", ""))),
+        "judicial_documents": _assign("judicial_documents", ("qcc_mcp_legal.judicial_documents", legal.get("裁判文书", ""))),
+        "court_announcement": _assign("court_announcement", ("qcc_mcp_legal.court_announcement", legal.get("法院公告", ""))),
+        "final_case": _assign("final_case", ("qcc_mcp_legal.final_case", legal.get("终本案件", ""))),
+        "environmental_penalty": _assign("environmental_penalty", ("qixin_api_51_1", qixin_api.get("环保处罚(API 51.1)", "")), ("qcc_mcp_tax.environmental_penalty", tax_environment.get("环保处罚", ""))),
+        "tax_abnormal": _assign("tax_abnormal", ("qixin_api_63_2", qixin_api.get("非正常户(API 63.2)", "")), ("qcc_mcp_tax.tax_abnormal", tax_environment.get("税务非正常户", ""))),
+        "tax_arrears": _assign("tax_arrears", ("qixin_api_20_1", qixin_api.get("欠税信息(API 20.1)", "")), ("qcc_mcp_tax.tax_arrears", tax_environment.get("欠税公告", ""))),
+        "tax_violation": _assign("tax_violation", ("qixin_api_20_3", qixin_api.get("重大税收违法(API 20.3)", "")), ("qcc_mcp_tax.tax_violation", tax_environment.get("税收违法", ""))),
+        "equity_pledge": _assign("equity_pledge", ("qixin_api_26_1", qixin_api.get("股权出质(API 26.1)", "")), ("qcc_mcp_asset.equity_pledge", asset_equity.get("股权出质", ""))),
+        "equity_freeze": _assign("equity_freeze", ("qixin_api_34_1", qixin_api.get("股权冻结(API 34.1)", "")), ("qcc_mcp_asset.equity_freeze", asset_equity.get("股权冻结", ""))),
+        "chattel_mortgage": _assign("chattel_mortgage", ("qixin_api_25_1", qixin_api.get("动产抵押(API 25.1)", "")), ("qcc_mcp_asset.chattel_mortgage", asset_equity.get("动产抵押", ""))),
+        "land_mortgage": _assign("land_mortgage", ("qcc_mcp_asset.land_mortgage", asset_equity.get("土地抵押", ""))),
         "history_risk": history_risk,
-        "history_dishonest": history_risk.get("历史失信", ""),
-        "history_executed_person": history_risk.get("历史被执行", ""),
-        "history_business_exception": history_risk.get("历史经营异常", ""),
-        "history_admin_penalty": history_risk.get("历史行政处罚", ""),
-        "patent": ip.get("专利信息", "") or operation_supplement.get("专利信息", ""),
-        "trademark": ip.get("商标信息", ""),
-        "software_copyright": ip.get("软件著作权", ""),
-        "bidding": operation.get("招投标记录", ""),
-        "qualifications": qixin_api.get("企业资质(API 22.1)", "") or operation.get("资质认证", ""),
-        "honor": operation.get("荣誉信息", ""),
-        "recruitment": operation.get("招聘信息", "") or operation_supplement.get("招聘信息", ""),
-        "administrative_license": operation.get("行政许可", "") or operation_land.get("行政许可", ""),
-        "taxpayer_qualification": operation.get("纳税人资质", "") or operation_land.get("纳税人资质", ""),
-        "product_check": operation.get("产品抽查", "") or operation_land.get("产品抽查", ""),
-        "state_owned_land_transfer": qixin_api.get("购地信息(API 61.1)", "") or operation.get("国有土地受让", "") or operation_land.get("国有土地受让", ""),
-        "news_sentiment": qcc_mcp.get("news", {}).get("新闻舆情", "") or operation_supplement.get("新闻舆情", ""),
+        "history_dishonest": _assign("history_dishonest", ("qcc_mcp_history.dishonest", history_risk.get("历史失信", ""))),
+        "history_executed_person": _assign("history_executed_person", ("qcc_mcp_history.executed_person", history_risk.get("历史被执行", ""))),
+        "history_business_exception": _assign("history_business_exception", ("qcc_mcp_history.business_exception", history_risk.get("历史经营异常", ""))),
+        "history_admin_penalty": _assign("history_admin_penalty", ("qcc_mcp_history.admin_penalty", history_risk.get("历史行政处罚", ""))),
+        "patent": _assign("patent", ("qcc_mcp_ip.patent", ip.get("专利信息", "")), ("qcc_mcp_triggered.patent", operation_supplement.get("专利信息", ""))),
+        "trademark": _assign("trademark", ("qcc_mcp_ip.trademark", ip.get("商标信息", ""))),
+        "software_copyright": _assign("software_copyright", ("qcc_mcp_ip.software_copyright", ip.get("软件著作权", ""))),
+        "bidding": _assign("bidding", ("qcc_mcp_operation.bidding", operation.get("招投标记录", ""))),
+        "qualifications": _assign("qualifications", ("qixin_api_22_1", qixin_api.get("企业资质(API 22.1)", "")), ("qcc_mcp_operation.qualifications", operation.get("资质认证", ""))),
+        "honor": _assign("honor", ("qcc_mcp_operation.honor", operation.get("荣誉信息", ""))),
+        "recruitment": _assign("recruitment", ("qcc_mcp_operation.recruitment", operation.get("招聘信息", "")), ("qcc_mcp_triggered.recruitment", operation_supplement.get("招聘信息", ""))),
+        "administrative_license": _assign("administrative_license", ("qcc_mcp_operation.administrative_license", operation.get("行政许可", "")), ("qcc_mcp_land.administrative_license", operation_land.get("行政许可", ""))),
+        "taxpayer_qualification": _assign("taxpayer_qualification", ("qcc_mcp_operation.taxpayer_qualification", operation.get("纳税人资质", "")), ("qcc_mcp_land.taxpayer_qualification", operation_land.get("纳税人资质", ""))),
+        "product_check": _assign("product_check", ("qcc_mcp_operation.product_check", operation.get("产品抽查", "")), ("qcc_mcp_land.product_check", operation_land.get("产品抽查", ""))),
+        "state_owned_land_transfer": _assign("state_owned_land_transfer", ("qixin_api_61_1", qixin_api.get("购地信息(API 61.1)", "")), ("qcc_mcp_operation.state_owned_land_transfer", operation.get("国有土地受让", "")), ("qcc_mcp_land.state_owned_land_transfer", operation_land.get("国有土地受让", ""))),
+        "news_sentiment": _assign("news_sentiment", ("qcc_mcp_news.news_sentiment", qcc_mcp.get("news", {}).get("新闻舆情", "")), ("qcc_mcp_triggered.news_sentiment", operation_supplement.get("新闻舆情", ""))),
+        "field_sources": field_sources,
+        "source_conflicts": source_conflicts if source_conflicts else [],
     }
 
 
@@ -801,21 +1058,21 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
     progress.append(
         _progress_event("qixin_api_checks", "running", collection_started_at, "正在查询启信宝白名单 API，工商照面优先使用统一社会信用代码，其余接口使用企业全称")
     )
-    qixin_api = _collect_qixin_api_evidence(api_search_key, enterprise_name)
+    qixin_api = _collect_qixin_api_evidence(api_search_key, enterprise_name, collection_mode)
     progress.append(
         _progress_event("qixin_api_checks", "completed", collection_started_at, "启信宝白名单 API 查询完成")
     )
     progress.append(
         _progress_event("qcc_mcp", "running", collection_started_at, f"正在采集企查查 MCP 结构化资料，模式={collection_mode}")
     )
-    qcc_mcp = _collect_qcc_mcp_evidence(mcp_search_key, collection_mode)
+    qcc_mcp = _collect_qcc_mcp_evidence(mcp_search_key, collection_mode, qixin_api=qixin_api)
     progress.append(
         _progress_event("qcc_mcp", "completed", collection_started_at, "企查查 MCP 结构化资料采集完成")
     )
     progress.append(
         _progress_event("triggered_collection", "running", collection_started_at, "正在判断是否需要按风险/证据缺口补查重字段")
     )
-    triggered_mcp = _collect_triggered_mcp_evidence(mcp_search_key, qcc_mcp, search_evidence, collection_mode)
+    triggered_mcp = _collect_triggered_mcp_evidence(mcp_search_key, qcc_mcp, search_evidence, collection_mode, qixin_api=qixin_api)
     progress.append(
         _progress_event(
             "triggered_collection",
@@ -837,6 +1094,9 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         max_chars=1200,
     )
     qcc_data_json = _truncate_evidence_value(_build_qcc_data_json(qcc_mcp, cnbizapi, qixin_api, triggered_mcp))
+    collection_diagnostics = _build_collection_diagnostics(
+        qixin_api, qcc_mcp, triggered_mcp, cnbizapi, qcc_data_json, collection_mode,
+    )
     progress.append(
         _progress_event("normalize_evidence", "completed", collection_started_at, "证据整理完成，AI 可进入评分和报告生成")
     )
@@ -850,11 +1110,11 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
             "qixin_search_key": api_search_key,
             "available_modes": "quick=主体+核心风险；standard=默认轻量评估；deep=全量KYB尽调。",
             "public_search_key": enterprise_name,
-            "subject_confirmation_priority": "启信宝 API 1.41 工商照面优先确认企业名称和统一社会信用代码；未命中时再使用 Coze/公开搜索候选确认。",
+            "subject_confirmation_priority": "启信宝 API 1.41 工商照面优先确认企业名称和统一社会信用代码；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。",
             "qixin_api_checks": "主体确认后固定查询启信宝白名单 API；1.41 优先使用统一社会信用代码，其余接口使用确认后的企业全称。",
             "cnbizapi_policy": "CNBizAPI 当前不进入默认固定采集，避免慢接口拖住 Coze 分析链路。",
             "qcc_mcp_search_key": mcp_search_key,
-            "qcc_mcp_key_rule": "企查查 MCP 不参与主体确认，只在启信宝未覆盖字段、缺失核心风险、深度尽调或触发补查时使用；已取得统一社会信用代码时，MCP 查询优先使用统一社会信用代码。若未配置 Key 或当天额度耗尽，直接跳过 MCP。",
+            "qcc_mcp_key_rule": "企查查 MCP 的工商登记可在启信宝 API 1.41 未命中时参与主体确认回退；其余 MCP 只在启信宝未覆盖字段、缺失核心风险、深度尽调或触发补查时使用。已取得统一社会信用代码时，MCP 查询优先使用统一社会信用代码。若未配置 Key 或当天额度耗尽，直接跳过 MCP。",
             "performance_guard": f"默认 standard 不再全量采集历史/税务环保/资产负担/司法详情；单字段证据超过 {EVIDENCE_FIELD_MAX_CHARS} 字符会截断，避免 Coze 运行阶段长时间卡顿。",
             "triggered_collection": triggered_mcp.get("_meta", {}) if isinstance(triggered_mcp, dict) else {},
             "ai_role": "AI只负责基于 evidence_json 解读、评分、生成 scoring_json 和报告。",
@@ -866,6 +1126,7 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
         "qcc_mcp": qcc_mcp,
         "triggered_mcp": triggered_mcp,
         "qcc_data_json": qcc_data_json,
+        "collection_diagnostics": collection_diagnostics,
         "required_scoring_sections": [
             "enterprise_profile",
             "subject_verification",

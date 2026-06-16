@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import time
 from typing import Any
 
@@ -43,6 +44,16 @@ try:
 except ValueError:
     logger.warning("QIXIN_CACHE_TTL_SECONDS 配置无效，已回退为 259200 秒")
     QIXIN_CACHE_TTL_SECONDS = 259200
+try:
+    QIXIN_CIRCUIT_BREAKER_SECONDS = int(os.getenv("QIXIN_CIRCUIT_BREAKER_SECONDS", "600"))
+except ValueError:
+    logger.warning("QIXIN_CIRCUIT_BREAKER_SECONDS 配置无效，已回退为 600 秒")
+    QIXIN_CIRCUIT_BREAKER_SECONDS = 600
+try:
+    QIXIN_PERSISTENT_CACHE_TTL_SECONDS = int(os.getenv("QIXIN_PERSISTENT_CACHE_TTL_SECONDS", "86400"))
+except ValueError:
+    logger.warning("QIXIN_PERSISTENT_CACHE_TTL_SECONDS 配置无效，已回退为 86400 秒")
+    QIXIN_PERSISTENT_CACHE_TTL_SECONDS = 86400
 
 ALLOWED_QIXIN_API_IDS = {
     "1.31",
@@ -172,10 +183,183 @@ QIXIN_API_SPECS: dict[str, dict[str, Any]] = {
 }
 
 _QIXIN_CACHE: dict[str, tuple[float, str]] = {}
+_QIXIN_CIRCUIT_STATE = {
+    "open_until": 0.0,
+    "error_code": "",
+    "message": "",
+    "api_id": "",
+}
+_QIXIN_CACHE_DIR = Path(os.getenv("QIXIN_CACHE_DIR", ".cache/qixin"))
 
 
 def is_qixin_configured() -> bool:
     return bool(QIXIN_APPKEY and QIXIN_SECRET_KEY)
+
+
+def parse_qixin_result(raw_result) -> dict[str, Any]:
+    if isinstance(raw_result, dict):
+        return raw_result
+    if not isinstance(raw_result, str):
+        return {}
+    text = raw_result.strip()
+    if not text or text[0] not in "[{":
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _build_qixin_error_result(
+    api_id: str,
+    error_code: str,
+    message: str,
+    *,
+    status: str = "",
+    retryable: bool = False,
+    fatal: bool = False,
+    raw_response: Any = None,
+) -> str:
+    spec = QIXIN_API_SPECS.get(api_id, {})
+    payload: dict[str, Any] = {
+        "ok": False,
+        "provider": "qixin",
+        "api_id": api_id,
+        "api_name": spec.get("name", api_id),
+        "error_code": error_code,
+        "message": message,
+        "status": status,
+        "retryable": retryable,
+        "fatal": fatal,
+    }
+    if raw_response not in (None, ""):
+        payload["raw_response"] = raw_response
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def is_qixin_result_ok(raw_result) -> bool:
+    parsed = parse_qixin_result(raw_result)
+    if parsed.get("provider") == "qixin" and parsed.get("ok") is False:
+        return False
+    if isinstance(raw_result, str):
+        return not raw_result.startswith("查询失败:")
+    return bool(raw_result)
+
+
+def is_qixin_unavailable(raw_result) -> bool:
+    parsed = parse_qixin_result(raw_result)
+    if parsed.get("provider") == "qixin" and parsed.get("ok") is False:
+        return bool(parsed.get("fatal"))
+    if isinstance(raw_result, str):
+        return any(keyword in raw_result for keyword in ("未配置", "账户未激活", "余额不足", "积分余额不足", "签名"))
+    return False
+
+
+def get_qixin_error_info(raw_result) -> dict[str, Any]:
+    parsed = parse_qixin_result(raw_result)
+    if parsed.get("provider") == "qixin" and parsed.get("ok") is False:
+        return parsed
+    if isinstance(raw_result, str) and raw_result.startswith("查询失败:"):
+        return {
+            "ok": False,
+            "provider": "qixin",
+            "error_code": "query_failed",
+            "message": raw_result,
+            "fatal": False,
+            "retryable": True,
+        }
+    return {}
+
+
+def _classify_qixin_payload(api_id: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
+    status = str(payload.get("status", "")).strip()
+    message = str(payload.get("message", "")).strip()
+    normalized_message = message.replace(" ", "")
+
+    if not status:
+        return True, None
+    if status in {"200", "201", "202"}:
+        return True, None
+
+    if status == "113" or "账户未激活" in normalized_message:
+        return False, _build_qixin_error_result(
+            api_id,
+            "account_inactive",
+            message or "启信宝账户未激活",
+            status=status,
+            retryable=False,
+            fatal=True,
+            raw_response=payload,
+        )
+    if any(keyword in normalized_message for keyword in ("未配置QIXIN_APPKEY", "未配置QIXIN_SECRET_KEY", "appkey不能为空", "secret")):
+        return False, _build_qixin_error_result(
+            api_id,
+            "config_invalid",
+            message or "启信宝鉴权配置无效",
+            status=status,
+            retryable=False,
+            fatal=True,
+            raw_response=payload,
+        )
+    if any(keyword in normalized_message for keyword in ("签名错误", "签名无效", "鉴权失败", "认证失败", "无权限")):
+        return False, _build_qixin_error_result(
+            api_id,
+            "auth_failed",
+            message or "启信宝鉴权失败",
+            status=status,
+            retryable=False,
+            fatal=True,
+            raw_response=payload,
+        )
+    if any(keyword in normalized_message for keyword in ("余额不足", "积分余额不足", "额度不足", "次数不足")):
+        return False, _build_qixin_error_result(
+            api_id,
+            "quota_exhausted",
+            message or "启信宝额度不足",
+            status=status,
+            retryable=False,
+            fatal=True,
+            raw_response=payload,
+        )
+    return False, _build_qixin_error_result(
+        api_id,
+        "api_error",
+        message or f"启信宝接口返回异常状态 {status}",
+        status=status,
+        retryable=True,
+        fatal=False,
+        raw_response=payload,
+    )
+
+
+def _open_qixin_circuit(error_info: dict[str, Any], api_id: str) -> None:
+    if not error_info.get("fatal"):
+        return
+    _QIXIN_CIRCUIT_STATE["open_until"] = time.time() + max(QIXIN_CIRCUIT_BREAKER_SECONDS, 0)
+    _QIXIN_CIRCUIT_STATE["error_code"] = str(error_info.get("error_code", "") or "")
+    _QIXIN_CIRCUIT_STATE["message"] = str(error_info.get("message", "") or "")
+    _QIXIN_CIRCUIT_STATE["api_id"] = api_id
+
+
+def _get_qixin_circuit_error(api_id: str) -> str | None:
+    open_until = float(_QIXIN_CIRCUIT_STATE.get("open_until", 0.0) or 0.0)
+    if open_until <= time.time():
+        if open_until:
+            _QIXIN_CIRCUIT_STATE.update({"open_until": 0.0, "error_code": "", "message": "", "api_id": ""})
+        return None
+    message = _QIXIN_CIRCUIT_STATE.get("message", "") or "启信宝熔断中，暂时跳过后续接口"
+    return _build_qixin_error_result(
+        api_id,
+        str(_QIXIN_CIRCUIT_STATE.get("error_code", "") or "circuit_open"),
+        message,
+        retryable=False,
+        fatal=True,
+        raw_response={
+            "open_until": int(open_until),
+            "source_api_id": _QIXIN_CIRCUIT_STATE.get("api_id", ""),
+        },
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -194,23 +378,70 @@ def _cache_key(api_id: str, params: dict[str, Any]) -> str:
     return f"{api_id}:{json.dumps(params, ensure_ascii=False, sort_keys=True)}"
 
 
-def _get_cached(key: str) -> str | None:
-    if QIXIN_CACHE_TTL_SECONDS <= 0:
+def _persistent_cache_file(key: str) -> Path:
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return _QIXIN_CACHE_DIR / f"{digest}.json"
+
+
+def _get_persistent_cached(key: str) -> str | None:
+    if QIXIN_PERSISTENT_CACHE_TTL_SECONDS <= 0:
         return None
-    cached = _QIXIN_CACHE.get(key)
-    if not cached:
+    cache_file = _persistent_cache_file(key)
+    if not cache_file.exists():
         return None
-    cached_at, value = cached
-    if time.time() - cached_at > QIXIN_CACHE_TTL_SECONDS:
-        _QIXIN_CACHE.pop(key, None)
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    cached_at = float(payload.get("cached_at", 0) or 0)
+    value = payload.get("value")
+    if not isinstance(value, str) or not cached_at:
+        return None
+    if time.time() - cached_at > QIXIN_PERSISTENT_CACHE_TTL_SECONDS:
+        try:
+            cache_file.unlink(missing_ok=True)
+        except Exception:
+            pass
         return None
     return value
 
 
-def _set_cached(key: str, value: str) -> None:
-    if QIXIN_CACHE_TTL_SECONDS <= 0 or value.startswith("查询失败:"):
+def _set_persistent_cached(key: str, value: str) -> None:
+    if QIXIN_PERSISTENT_CACHE_TTL_SECONDS <= 0 or not is_qixin_result_ok(value):
         return
-    _QIXIN_CACHE[key] = (time.time(), value)
+    cache_file = _persistent_cache_file(key)
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cached_at": time.time(),
+            "value": value,
+        }
+        cache_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Skip writing qixin persistent cache: %s", exc)
+
+
+def _get_cached(key: str) -> str | None:
+    if QIXIN_CACHE_TTL_SECONDS <= 0:
+        return _get_persistent_cached(key)
+    cached = _QIXIN_CACHE.get(key)
+    if cached:
+        cached_at, value = cached
+        if time.time() - cached_at <= QIXIN_CACHE_TTL_SECONDS:
+            return value
+        _QIXIN_CACHE.pop(key, None)
+    persistent = _get_persistent_cached(key)
+    if persistent is not None:
+        _QIXIN_CACHE[key] = (time.time(), persistent)
+    return persistent
+
+
+def _set_cached(key: str, value: str) -> None:
+    if not is_qixin_result_ok(value):
+        return
+    if QIXIN_CACHE_TTL_SECONDS > 0:
+        _QIXIN_CACHE[key] = (time.time(), value)
+    _set_persistent_cached(key, value)
 
 
 def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: int = 30) -> str:
@@ -218,9 +449,13 @@ def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: 
     api_id = str(api_id or "").strip()
     if api_id not in ALLOWED_QIXIN_API_IDS:
         allowed = "/".join(sorted(ALLOWED_QIXIN_API_IDS))
-        return f"查询失败: 当前仅允许调用启信宝 API ID {allowed}"
+        return _build_qixin_error_result(api_id, "api_not_allowed", f"当前仅允许调用启信宝 API ID {allowed}", fatal=False)
     if not is_qixin_configured():
-        return "查询失败: 未配置 QIXIN_APPKEY 或 QIXIN_SECRET_KEY"
+        return _build_qixin_error_result(api_id, "config_missing", "未配置 QIXIN_APPKEY 或 QIXIN_SECRET_KEY", fatal=True)
+
+    circuit_error = _get_qixin_circuit_error(api_id)
+    if circuit_error is not None:
+        return circuit_error
 
     spec = QIXIN_API_SPECS[api_id]
     request_params = dict(spec.get("extra_params") or {})
@@ -239,13 +474,32 @@ def query_qixin_api(api_id: str, params: dict[str, Any] | None = None, timeout: 
         except ValueError:
             data = {"raw_text": resp.text[:1000]}
         if resp.status_code != 200:
-            raise RuntimeError(f"启信宝 API 请求失败: status={resp.status_code}, body={str(data)[:500]}")
+            return _build_qixin_error_result(
+                api_id,
+                "http_error",
+                f"启信宝 API 请求失败: status={resp.status_code}",
+                status=str(resp.status_code),
+                retryable=True,
+                fatal=False,
+                raw_response=data,
+            )
+        ok, normalized_error = _classify_qixin_payload(api_id, data)
+        if not ok and normalized_error is not None:
+            error_info = get_qixin_error_info(normalized_error)
+            _open_qixin_circuit(error_info, api_id)
+            return normalized_error
         result = json.dumps(data, ensure_ascii=False)
         _set_cached(key, result)
         return result
     except Exception as exc:
         logger.warning("Qixin API query failed: api_id=%s error=%s", api_id, exc)
-        return f"查询失败: {exc}"
+        return _build_qixin_error_result(
+            api_id,
+            "request_exception",
+            f"启信宝请求异常: {exc}",
+            retryable=True,
+            fatal=False,
+        )
 
 
 def query_qixin_by_search_key(api_id: str, search_key: str, timeout: int = 30, **extra_params: Any) -> str:

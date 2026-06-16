@@ -5,6 +5,7 @@ dist
 .git/*
 __pycache__/
 *.pyc
+.cache/
 .venv
 *.o
 *.a
@@ -12,6 +13,9 @@ __pycache__/
 *.egg-info/
 /.env
 .env
+.env.local
+.env.*.local
+AI分析话术.txt
 .cozeproj/reduction
 
 # 视频文件
