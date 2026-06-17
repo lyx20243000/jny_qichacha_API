@@ -19,8 +19,8 @@ git diff --check
 3. `src/agents/agent.py` 根据 `config/agent_llm_config.json` 构建 Agent 和工具列表。
 4. Agent 必须先调用 `collect_enterprise_evidence`。
 5. `collect_enterprise_evidence` 内部完成主体确认、启信宝白名单 API 固定采集、公开搜索、按模式决定是否追加国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
-6. Agent 基于 `evidence_json` / `evidence_summary` 解读、评分并构建 `scoring_json`。
-7. Agent 调用 `generate_enterprise_report`，并尽量传入 `qcc_data_json`，避免报告阶段重复请求企查查 MCP。
+6. Agent 优先基于 `evidence_summary` 解读、评分并构建 `scoring_json`；只有摘要证据不足、存在冲突，或用户要求深度复核时，才继续读取 `search_evidence`、`qcc_mcp`、`triggered_mcp` 原文。
+7. Agent 调用 `generate_enterprise_report`，并尽量同时传入 `qcc_data_json` 与 `collection_diagnostics_json`；前者复用结构化采集结果，后者复用 `recommended_next_step` / `review_reasons`，避免报告阶段重复请求企查查 MCP，且让动作建议继续贴合采集健康度。
 
 ## 数据源策略
 
@@ -85,6 +85,8 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `qcc_get_extended_risk_info`
 - `generate_enterprise_report`
 
+当前仓库未发现独立的 Coze 工具参数声明文件。结合 `.coze` 仅负责 entrypoint/build/run/deploy，和 `src/agents/agent.py` 直接以 `create_agent(..., tools=[...])` 注册工具的方式，可以确认当前部署链路下工具参数暴露直接跟随 LangChain `@tool` 装饰器和函数签名。因此 `generate_enterprise_report` 新增 `collection_diagnostics_json` 后，不需要额外再维护一份 Coze schema 配置。
+
 ## 固定采集返回
 
 `collect_enterprise_evidence` 返回：
@@ -100,6 +102,30 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `qcc_data_json`
 - `collection_diagnostics`
 
+`evidence_summary` 当前按以下层次组织，供 Agent 优先阅读：
+
+- `subject_profile`
+- `official_structured_summary`
+- `official_search_summary`
+- `operation_signal_summary`
+- `finance_signal_summary`
+- `risk_signal_summary`
+- `search_signal_summary`
+- `field_gaps`
+- `conflict_flags`
+- `scoring_hints`
+
+`search_evidence` 当前是结构化搜索结果，而不是旧的纯文本摘要。每个搜索分组都会带：
+
+- `query`
+- `profile_name`
+- `search_type`
+- `summary`
+- `items`
+- `stats`
+
+其中 `items` 会保留标题、站点、链接、摘要、发布时间、权威度等字段；`stats` 会汇总 `result_count`、`official_hits`、`high_auth_hits`、`content_hits`。
+
 `qcc_data_json` 名称暂时保留为兼容字段，内部实际承载“启信宝 API 主数据源 + 企查查 MCP 补充数据源”的紧凑 JSON，供 `generate_enterprise_report` 复用。报告阶段默认只复用这里已传入的数据，不再主动发起新的 MCP 查询。当前已增加：
 
 - `field_sources`：标记关键字段最终来自启信宝、企查查 MCP 还是触发补查。
@@ -109,8 +135,16 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 - 启信宝是否发生致命错误、是否提前终止、完成到哪个采集阶段、命中/缺失计数、是否命中持久化缓存。
 - standard 模式下是否因启信宝不可用或关键字段缺失而自动提升企查查 MCP seed collection。
+- 搜索侧分组、官方命中、高权威命中、正文命中、官网命中、GSXT 命中。
+- `module_completeness`，即主体、风险、财务、经营、关联方等模块完整度。
 - `qcc_data_json` 中字段来源分布、缺失字段数量、来源冲突数量。
-- 是否建议人工复核，以及复核原因列表。
+- 是否建议人工复核、建议下一步动作（`continue_scoring` / `trigger_deep` / `human_review`），以及复核原因列表。
+
+报告阶段当前也支持把 `collection_diagnostics` 作为紧凑 JSON 字符串通过 `collection_diagnostics_json` 传给 `generate_enterprise_report`。这样报告工具可在 LLM 未明确写出动作建议时，继续兜底补全：
+
+- `action_recommendation.next_action`
+- `action_recommendation.key_risks`
+- 与 deep / 人工复核相关的合作建议
 
 ## 采集模式
 
@@ -130,7 +164,10 @@ EVIDENCE_FIELD_MAX_CHARS=2500
 
 ## 报告输出
 
-`generate_enterprise_report` 必须传入 `enterprise_name` 和合法紧凑 JSON 字符串 `scoring_json`。建议同时传入 `qcc_data_json`，复用固定采集数据；未传入时，报告仍可生成，但只基于现有 `scoring_json` 和已传入内容，不会在报告阶段自动回查 MCP。
+`generate_enterprise_report` 必须传入 `enterprise_name` 和合法紧凑 JSON 字符串 `scoring_json`。建议同时传入 `qcc_data_json` 与 `collection_diagnostics_json`：
+
+- `qcc_data_json`：复用固定结构化采集结果；未传入时，报告仍可生成，但不会在报告阶段自动回查 MCP。
+- `collection_diagnostics_json`：复用 `recommended_next_step` / `review_reasons`，让报告动作建议继续贴近当前采集缺口和复核需求；未传入时，报告仍可生成，只是缺少这层采集诊断兜底。
 
 PDF 报告由 Markdown 正文通过 Coze `DocumentGenerationClient.create_pdf_from_markdown` 生成。
 

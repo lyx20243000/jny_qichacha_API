@@ -218,6 +218,230 @@ def _ensure_enterprise_profile(scoring_result: dict, enterprise_name: str, qcc_d
     scoring_result["enterprise_profile"] = profile
 
 
+def _ensure_text_list(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item not in (None, "", [], {})]
+    return [str(value)]
+
+
+def _append_unique_text(target: list[str], text: str) -> None:
+    text = str(text or "").strip()
+    if text and text not in target:
+        target.append(text)
+
+
+def _field_source_label(source_name: str) -> str:
+    source_name = str(source_name or "")
+    if source_name.startswith("qixin_api"):
+        return "启信宝API"
+    if source_name.startswith("qcc_mcp"):
+        return "企查查MCP"
+    if source_name.startswith("triggered_mcp"):
+        return "触发补查MCP"
+    return source_name or "未知来源"
+
+
+def _ensure_subject_verification(scoring_result: dict, qcc_data: dict) -> None:
+    section = scoring_result.get("subject_verification") or {}
+    if isinstance(section, str):
+        section = {"核验结论": section}
+    if not isinstance(section, dict):
+        section = {}
+
+    registration = qcc_data.get("registration", "")
+    registration_text = _format_qcc_value(registration)
+    registration_status = (
+        section.get("登记状态")
+        or _first_nested_value(
+            registration,
+            ("登记状态", "经营状态", "状态", "status", "regStatus", "companyStatus"),
+        )
+    )
+
+    if not registration_status:
+        registration_status = "已获取，需结合原始登记信息复核" if registration_text else "未获取"
+
+    if registration_text:
+        section.setdefault("核验结论", "主体一致")
+    else:
+        section.setdefault("核验结论", "需复核")
+    section.setdefault("登记状态", registration_status)
+    section.setdefault("经营范围匹配", "已完成主体确认，仍需结合合作场景复核经营范围是否匹配。")
+    section.setdefault("地址一致性", "已完成主体确认，仍需结合注册地址与实际经营地址进一步复核。")
+    scoring_result["subject_verification"] = section
+
+
+def _ensure_financial_supporting_sections(scoring_result: dict, qcc_data: dict) -> None:
+    notes = _ensure_text_list(scoring_result.get("financial_assessment_notes"))
+    missing_fields = _ensure_text_list(scoring_result.get("missing_financial_fields"))
+
+    financial_text = _format_qcc_value(qcc_data.get("financial", ""))
+    financial_missing = (
+        not financial_text
+        or financial_text == "未查询到相关记录。"
+        or "未获取" in financial_text
+        or "查询失败" in financial_text
+        or "额度不足" in financial_text
+    )
+    if financial_missing:
+        _append_unique_text(
+            notes,
+            "未获取到可直接用于营收、利润、现金流和资产负债率判断的权威财务数据，财务透明度不足，需结合间接经营证据审慎判断。",
+        )
+        for field_name in ("年营收", "净利润率", "现金流", "资产负债率"):
+            _append_unique_text(missing_fields, field_name)
+
+    if notes:
+        scoring_result["financial_assessment_notes"] = notes
+    if missing_fields:
+        scoring_result["missing_financial_fields"] = missing_fields
+
+
+def _ensure_data_source_summary(scoring_result: dict, qcc_data: dict) -> None:
+    summary = scoring_result.get("data_source_summary") or {}
+    if isinstance(summary, str):
+        summary = {"official_or_structured": summary}
+    if not isinstance(summary, dict):
+        summary = {}
+
+    field_sources = qcc_data.get("field_sources", {}) or {}
+    source_counts: dict[str, int] = {}
+    if isinstance(field_sources, dict):
+        for raw_source in field_sources.values():
+            label = _field_source_label(raw_source)
+            source_counts[label] = source_counts.get(label, 0) + 1
+
+    if source_counts and not summary.get("official_or_structured"):
+        parts = [f"{label}{count}项" for label, count in sorted(source_counts.items())]
+        summary["official_or_structured"] = "本次结构化字段主要来自" + "、".join(parts) + "。"
+
+    conflicts = qcc_data.get("source_conflicts", []) or []
+    if conflicts and not summary.get("inference"):
+        conflict_texts = []
+        for item in conflicts[:5]:
+            if not isinstance(item, dict):
+                continue
+            field_name = str(item.get("field") or "未知字段")
+            sources = [
+                _field_source_label(source.get("source", ""))
+                for source in item.get("sources", [])
+                if isinstance(source, dict)
+            ]
+            if sources:
+                conflict_texts.append(f"{field_name}（{'、'.join(dict.fromkeys(sources))}）")
+            else:
+                conflict_texts.append(field_name)
+        if conflict_texts:
+            summary["inference"] = (
+                "以下字段存在来源冲突，评分和报告解释应优先采用更高权威结构化记录，并建议人工复核："
+                + "；".join(conflict_texts)
+                + "。"
+            )
+
+    if summary:
+        scoring_result["data_source_summary"] = summary
+
+
+def _ensure_action_recommendation(scoring_result: dict, qcc_data: dict) -> None:
+    recommendation = scoring_result.get("action_recommendation") or {}
+    if isinstance(recommendation, str):
+        recommendation = {"cooperation_advice": recommendation}
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+
+    key_risks = _ensure_text_list(recommendation.get("key_risks"))
+    required_materials = _ensure_text_list(recommendation.get("required_materials"))
+
+    conflicts = qcc_data.get("source_conflicts", []) or []
+    has_conflict = False
+    for item in conflicts[:5]:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("field") or "未知字段")
+        source_names = [
+            _field_source_label(source.get("source", ""))
+            for source in item.get("sources", [])
+            if isinstance(source, dict)
+        ]
+        if source_names:
+            has_conflict = True
+            _append_unique_text(
+                key_risks,
+                f"字段来源存在冲突：{field_name}（{'、'.join(dict.fromkeys(source_names))}），建议人工复核原始记录。",
+            )
+
+    missing_financial_fields = _ensure_text_list(scoring_result.get("missing_financial_fields"))
+    if missing_financial_fields:
+        for material in ("近两年财务报表", "审计报告", "纳税证明", "银行流水"):
+            _append_unique_text(required_materials, material)
+
+    if has_conflict:
+        recommendation.setdefault("conclusion", "建议人工复核后再决定合作或准入结论。")
+        recommendation.setdefault("next_action", "进入人工复核")
+    elif missing_financial_fields:
+        recommendation.setdefault("next_action", "补充资料后再评估")
+
+    if key_risks:
+        recommendation["key_risks"] = key_risks
+    if required_materials:
+        recommendation["required_materials"] = required_materials
+    if recommendation:
+        scoring_result["action_recommendation"] = recommendation
+
+
+def _ensure_collection_diagnostics_guidance(scoring_result: dict, collection_diagnostics: dict) -> None:
+    if not collection_diagnostics:
+        return
+
+    recommendation = scoring_result.get("action_recommendation") or {}
+    if isinstance(recommendation, str):
+        recommendation = {"cooperation_advice": recommendation}
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+
+    key_risks = _ensure_text_list(recommendation.get("key_risks"))
+    next_step = str(collection_diagnostics.get("recommended_next_step") or "").strip()
+    review_reasons = _ensure_text_list(collection_diagnostics.get("review_reasons"))
+
+    if review_reasons:
+        _append_unique_text(
+            key_risks,
+            "采集诊断提示需重点关注：" + "；".join(review_reasons) + "。",
+        )
+
+    if next_step == "human_review":
+        recommendation.setdefault("conclusion", "当前采集结果存在明显缺口或冲突，建议先人工复核。")
+        recommendation.setdefault("next_action", "进入人工复核")
+    elif next_step == "trigger_deep":
+        recommendation.setdefault("next_action", "补充深度采集后再评估")
+        recommendation.setdefault(
+            "cooperation_advice",
+            "当前建议先补充 deep 模式采集或追加权威核验，再决定是否进入正式合作判断。",
+        )
+    elif next_step == "continue_scoring":
+        recommendation.setdefault("next_action", "直接进入合作流程")
+
+    if key_risks:
+        recommendation["key_risks"] = key_risks
+    if recommendation:
+        scoring_result["action_recommendation"] = recommendation
+
+
+def _ensure_report_supporting_sections(scoring_result: dict, enterprise_name: str, qcc_data: dict) -> None:
+    _ensure_enterprise_profile(scoring_result, enterprise_name, qcc_data)
+    if not qcc_data:
+        return
+    _ensure_subject_verification(scoring_result, qcc_data)
+    _ensure_financial_supporting_sections(scoring_result, qcc_data)
+    _ensure_data_source_summary(scoring_result, qcc_data)
+    _ensure_action_recommendation(scoring_result, qcc_data)
+    _ensure_kyb_review_sections(scoring_result, qcc_data)
+
+
 def _looks_like_generic_report_name(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -380,6 +604,17 @@ def _parse_qcc_data_json(qcc_data_json: str) -> dict:
     parsed = json.loads(qcc_data_json)
     if not isinstance(parsed, dict):
         raise ValueError("qcc_data_json 必须是 JSON object")
+    return parsed
+
+
+def _parse_collection_diagnostics_json(collection_diagnostics_json: str) -> dict:
+    """解析 collect_enterprise_evidence 返回的 collection_diagnostics。"""
+    if not collection_diagnostics_json or not collection_diagnostics_json.strip():
+        return {}
+
+    parsed = json.loads(collection_diagnostics_json)
+    if not isinstance(parsed, dict):
+        raise ValueError("collection_diagnostics_json 必须是 JSON object")
     return parsed
 
 
@@ -559,7 +794,12 @@ def _ensure_kyb_review_sections(scoring_result: dict, qcc_data: dict) -> None:
 
 
 @tool
-def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = "", qcc_data_json: str = "") -> str:
+def generate_enterprise_report(
+    enterprise_name: str = "",
+    scoring_json: str = "",
+    qcc_data_json: str = "",
+    collection_diagnostics_json: str = "",
+) -> str:
     """根据评分结果计算加权总分、确定评级并生成 PDF 分析报告。
     优先使用 qcc_data_json 中的启信宝主数据和企查查 MCP 补充数据来验证和修正评分。
     如果未传入 qcc_data_json，工具不会在报告阶段自动回查企查查MCP，而是仅基于 scoring_json 和已传入数据生成报告。
@@ -582,6 +822,8 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
         qcc_data_json: 可选，Agent 已获取的结构化数据 JSON 字符串，字段建议包括:
             registration, dishonest, admin_penalty, business_exception, high_consumption,
             patent, qualifications, credit_eval, shareholder, investment, financial
+        collection_diagnostics_json: 可选，collect_enterprise_evidence 返回的 collection_diagnostics JSON 字符串，
+            用于补充 recommended_next_step / review_reasons 到行动建议。
 
     Returns:
         包含评级、总分和报告链接的结果文本
@@ -602,6 +844,7 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
     # 避免数据漂移和 MCP 额度重复消耗
     qcc_data = {}
     qcc_summary = ""
+    collection_diagnostics = {}
     if qcc_data_json:
         try:
             qcc_data = _parse_qcc_data_json(qcc_data_json)
@@ -616,9 +859,14 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
                        f"This indicates collect_enterprise_evidence did not pass qcc_data_json.")
         qcc_summary = "【未提供企查查MCP数据，仅基于评分JSON生成报告】"
 
+    if collection_diagnostics_json:
+        try:
+            collection_diagnostics = _parse_collection_diagnostics_json(collection_diagnostics_json)
+        except Exception as e:
+            logger.warning(f"collection_diagnostics parse failed for {enterprise_name}: {e}")
+
     if qcc_data:
-        _ensure_enterprise_profile(scoring_result, enterprise_name, qcc_data)
-        _ensure_kyb_review_sections(scoring_result, qcc_data)
+        _ensure_report_supporting_sections(scoring_result, enterprise_name, qcc_data)
 
         try:
             dishonest_info = qcc_data.get("dishonest", "")
@@ -657,7 +905,10 @@ def generate_enterprise_report(enterprise_name: str = "", scoring_json: str = ""
         except Exception:
             pass
     else:
-        _ensure_enterprise_profile(scoring_result, enterprise_name, {})
+        _ensure_report_supporting_sections(scoring_result, enterprise_name, {})
+
+    if collection_diagnostics:
+        _ensure_collection_diagnostics_guidance(scoring_result, collection_diagnostics)
 
     report_enterprise_name = _resolve_report_enterprise_name(scoring_result, enterprise_name)
 

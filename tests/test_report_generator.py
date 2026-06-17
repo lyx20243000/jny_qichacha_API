@@ -47,6 +47,7 @@ import services.report_generator as report_generator
 from services.report_generator import _build_pdf_report_title, generate_markdown_report, generate_pdf_report
 
 sys.path.insert(0, "src")
+import tools.report_tool as report_tool
 from tools.report_tool import _parse_qcc_data_json, _qcc_data_to_summary
 
 
@@ -202,3 +203,120 @@ def test_qcc_data_to_summary_with_field_sources_and_conflicts():
     summary = _qcc_data_to_summary(qcc_data)
     assert "启信宝" in summary or "结构化数据" in summary
     assert "工商登记信息" in summary
+
+
+def test_generate_enterprise_report_enriches_supporting_sections(monkeypatch):
+    captured = {}
+
+    def _fake_evaluate(scoring_result):
+        return {
+            "final_grade": "B",
+            "weighted_total_score": 82,
+            "triggered_red_lines": [],
+            "dimensions": {
+                "industry": {"total_score": 0, "max_score": 32, "items": []},
+                "operation": {"total_score": 0, "max_score": 27, "items": []},
+                "finance": {"total_score": 0, "max_score": 35, "items": []},
+                "credit": {"total_score": 0, "max_score": 10, "items": []},
+            },
+        }
+
+    def _fake_generate_pdf_report(enterprise_name, evaluation_result, scoring_result, summary, qcc_data_summary=""):
+        captured["enterprise_name"] = enterprise_name
+        captured["scoring_result"] = scoring_result
+        captured["summary"] = summary
+        captured["qcc_data_summary"] = qcc_data_summary
+        return "https://example.com/report.pdf"
+
+    monkeypatch.setattr(report_tool, "evaluate", _fake_evaluate)
+    monkeypatch.setattr(report_tool, "generate_pdf_report", _fake_generate_pdf_report)
+
+    scoring_json = json.dumps({"overall_summary": "综合评价"}, ensure_ascii=False)
+    qcc_data_json = json.dumps(
+        {
+            "provider": "qixin_primary_qcc_mcp_fallback",
+            "field_sources": {
+                "registration": "qixin_api_1_41",
+                "shareholder": "qcc_mcp_basic.shareholder",
+            },
+            "source_conflicts": [
+                {
+                    "field": "dishonest",
+                    "sources": [
+                        {"source": "qixin_api_5_5", "preview": "启信宝失信记录"},
+                        {"source": "qcc_mcp_risk.dishonest", "preview": "MCP失信记录"},
+                    ],
+                }
+            ],
+            "registration": {
+                "企业名称": "测试企业",
+                "统一社会信用代码": "913100000000000000",
+                "登记状态": "存续",
+            },
+            "financial": "未查询到相关记录。",
+            "dishonest": "未查询到相关记录。",
+            "business_exception": "未查询到相关记录。",
+            "serious_violation": "未查询到相关记录。",
+            "high_consumption": "未查询到相关记录。",
+        },
+        ensure_ascii=False,
+    )
+
+    result = report_tool.generate_enterprise_report(
+        enterprise_name="测试企业",
+        scoring_json=scoring_json,
+        qcc_data_json=qcc_data_json,
+    )
+
+    enriched = captured["scoring_result"]
+    assert enriched["subject_verification"]["核验结论"] == "主体一致"
+    assert enriched["subject_verification"]["登记状态"] == "存续"
+    assert "年营收" in enriched["missing_financial_fields"]
+    assert any("财务透明度不足" in item for item in enriched["financial_assessment_notes"])
+    assert "启信宝API" in enriched["data_source_summary"]["official_or_structured"]
+    assert any("dishonest" in item for item in enriched["action_recommendation"]["key_risks"])
+    assert enriched["action_recommendation"]["next_action"] == "进入人工复核"
+    assert captured["enterprise_name"] == "测试企业"
+    assert result.endswith("(https://example.com/report.pdf)")
+
+
+def test_generate_enterprise_report_uses_collection_diagnostics_next_step(monkeypatch):
+    captured = {}
+
+    def _fake_evaluate(scoring_result):
+        return {
+            "final_grade": "B",
+            "weighted_total_score": 80,
+            "triggered_red_lines": [],
+            "dimensions": {
+                "industry": {"total_score": 0, "max_score": 32, "items": []},
+                "operation": {"total_score": 0, "max_score": 27, "items": []},
+                "finance": {"total_score": 0, "max_score": 35, "items": []},
+                "credit": {"total_score": 0, "max_score": 10, "items": []},
+            },
+        }
+
+    def _fake_generate_pdf_report(enterprise_name, evaluation_result, scoring_result, summary, qcc_data_summary=""):
+        captured["scoring_result"] = scoring_result
+        return "https://example.com/report.pdf"
+
+    monkeypatch.setattr(report_tool, "evaluate", _fake_evaluate)
+    monkeypatch.setattr(report_tool, "generate_pdf_report", _fake_generate_pdf_report)
+
+    result = report_tool.generate_enterprise_report(
+        enterprise_name="测试企业",
+        scoring_json=json.dumps({"overall_summary": "综合评价"}, ensure_ascii=False),
+        collection_diagnostics_json=json.dumps(
+            {
+                "recommended_next_step": "trigger_deep",
+                "review_reasons": ["缺失字段>=6", "高权威搜索命中不足"],
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    enriched = captured["scoring_result"]
+    assert enriched["action_recommendation"]["next_action"] == "补充深度采集后再评估"
+    assert "deep 模式采集" in enriched["action_recommendation"]["cooperation_advice"]
+    assert any("采集诊断提示需重点关注" in item for item in enriched["action_recommendation"]["key_risks"])
+    assert result.endswith("(https://example.com/report.pdf)")

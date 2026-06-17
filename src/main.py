@@ -55,6 +55,7 @@ from coze_coding_utils.log.loop_trace import init_run_config, init_agent_config
 
 # 超时配置常量
 TIMEOUT_SECONDS = 900  # 15分钟
+STREAM_PROGRESS_INTERVAL_SECONDS = 10
 
 class GraphService:
     def __init__(self):
@@ -156,15 +157,44 @@ class GraphService:
             run_config = init_run_config(graph, ctx)  # vibeflow
 
         is_workflow = not graph_helper.is_agent_proj()
+        started_at = time.monotonic()
+        stream_iter = self.astream(payload, graph, run_config=run_config, ctx=ctx, run_opt=run_opt).__aiter__()
+        next_chunk_task: Optional[asyncio.Task] = None
 
         try:
-            async for chunk in self.astream(payload, graph, run_config=run_config, ctx=ctx, run_opt=run_opt):
+            while True:
+                if next_chunk_task is None:
+                    next_chunk_task = asyncio.create_task(stream_iter.__anext__())
+                done, _ = await asyncio.wait(
+                    {next_chunk_task},
+                    timeout=STREAM_PROGRESS_INTERVAL_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    yield self._sse_event(
+                        {
+                            "type": "progress",
+                            "run_id": run_id,
+                            "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                            "message": "仍在处理中，请稍候",
+                        }
+                    )
+                    continue
+                try:
+                    chunk = next_chunk_task.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    next_chunk_task = None
+
                 if is_workflow and isinstance(chunk, tuple):
                     event_id, data = chunk
                     yield self._sse_event(data, event_id)
                 else:
                     yield self._sse_event(chunk)
         finally:
+            if next_chunk_task is not None and not next_chunk_task.done():
+                next_chunk_task.cancel()
             # 清理任务记录
             self.running_tasks.pop(run_id, None)
             cozeloop.flush()
