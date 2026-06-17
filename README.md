@@ -18,7 +18,7 @@
 
 - 根据用户输入的企业名称或统一社会信用代码，默认通过 `generate_enterprise_report_single` 端到端生成报告；该工具内部先通过 `collect_enterprise_evidence` 完成主体确认和完整证据采集。
 - 主体确认优先使用启信宝 API `1.41` 工商照面；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。
-- 主体确认后按分层策略采集启信宝白名单接口数据：standard 默认先查主体、核心风险和关键资质，并固定补充公开搜索中的行业、工商、财务和发展线索；deep 才进一步扩展到国家企业信用信息公示系统线索、资产负担、土地和案件串联。若启信宝不可用或关键字段缺失较多，standard 会自动提升企查查 MCP 做基础工商/风险/财务补位。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
+- 主体确认后按分层策略采集启信宝白名单接口数据：完整报告入口固定使用 `deep` 全量采集；`standard` 仅用于单独调试或轻量采集工具调用。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
 - 按行业、企业经营、财务、信用四个维度评分。
 - 输出企业分析结论、数据可信度、财务缺失说明、重点风险和行动建议，并通过 Coze 文档服务生成 PDF 报告链接。
 
@@ -26,7 +26,7 @@
 
 当前默认报告链路已撤销多轮/多维度 LLM，改回 `generate_enterprise_report_single`：
 
-1. 完整采集：内部默认用 `collection_mode=deep` 调用 `collect_enterprise_evidence`，尽量采集启信宝白名单 API、公开搜索和企查查 MCP 补充数据。
+1. 完整采集：内部强制用 `collection_mode=deep` 调用 `collect_enterprise_evidence`，即使外层误传 `standard` 或 `quick`，完整报告仍按全量采集执行。
 2. 单次 LLM：将完整采集结果压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
 3. 报告生成：调用 `generate_enterprise_report` 计算加权分、兜底补全报告字段并生成 PDF。
 
@@ -126,6 +126,6 @@ git diff --check
 - 任务进度：`docs/TASKS.md`
 ## 当前默认报告流程
 
-默认完整报告入口是 `generate_enterprise_report_single`。它会先以 `deep`
+默认完整报告入口是 `generate_enterprise_report_single`。它会强制以 `deep`
 模式完成固定证据采集，再一次性调用 LLM 生成完整 `scoring_json`，最后调用
 `generate_enterprise_report` 输出 PDF。

@@ -17,6 +17,8 @@ from tools.tool_runtime_helpers import as_json_object, invoke_langchain_tool, st
 
 logger = logging.getLogger(__name__)
 
+FULL_REPORT_COLLECTION_MODE = "deep"
+
 
 @tool
 def generate_enterprise_report_single(user_input: str, collection_mode: str = "deep") -> str:
@@ -28,13 +30,18 @@ def generate_enterprise_report_single(user_input: str, collection_mode: str = "d
     started_at = time.monotonic()
     ctx = request_context.get()
     cfg = load_llm_config()
-    timings: dict[str, Any] = {}
+    requested_collection_mode = collection_mode
+    effective_collection_mode = FULL_REPORT_COLLECTION_MODE
+    timings: dict[str, Any] = {
+        "requested_collection_mode": requested_collection_mode,
+        "effective_collection_mode": effective_collection_mode,
+    }
 
     try:
         evidence_started = time.monotonic()
         evidence_text = invoke_langchain_tool(
             collect_enterprise_evidence,
-            {"user_input": user_input, "collection_mode": collection_mode},
+            {"user_input": user_input, "collection_mode": effective_collection_mode},
         )
         timings["evidence_collection"] = stage_timing(evidence_started)
         evidence_payload = as_json_object(evidence_text, "collect_enterprise_evidence result")

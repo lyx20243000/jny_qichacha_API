@@ -40,7 +40,7 @@
 - [x] 已收敛 Agent 运行时默认入口前缀，并同步 `config/agent_llm_config.json`，避免配置 SP 与运行时前缀产生默认入口冲突。
 - [x] 已压缩外层 Agent SP，将完整评分细则下沉到单次 LLM prompt；外层只保留工具路由、主体确认、数据源边界和禁止事项。
 - [x] 已为 `tool_runtime_helpers.invoke_langchain_tool` 增加注释，明确它是工具内部编排直调 `.func` 的 helper，避免误认为要走 LangChain invoke 中间件链。
-- [x] 已按最新要求撤销默认多轮/多维度 LLM，新增 `generate_enterprise_report_single`，默认 deep 采集全部数据后只调用一次 LLM 生成完整 `scoring_json`。
+- [x] 已按最新要求撤销默认多轮/多维度 LLM，新增 `generate_enterprise_report_single`，并强制 deep 采集全部数据后只调用一次 LLM 生成完整 `scoring_json`。
 - [x] Agent 默认工具列表已移除 `generate_enterprise_report_parallel` 和 `generate_enterprise_report_two_stage`，避免 Coze 默认选到多轮链路。
 - [x] `config/agent_llm_config.json` 已移除 `parallel_generation` / `two_stage_generation` 默认配置，改为 `single_stage_generation`。
 - [x] 单次 LLM 超时已设置为 600 秒。
@@ -63,7 +63,7 @@
 - [ ] 验证启信宝接口 `32.1` 的“地产行政处罚”在报告中不会被误写成通用行政处罚。
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
 - [ ] 在 Coze 环境验证 `generate_enterprise_report_single` 是否优先被 Agent 调用。
-- [ ] 在 Coze 环境验证默认 deep 采集后仅发生一次 LLM scoring 调用，再进入 PDF 生成。
+- [ ] 在 Coze 环境验证完整报告入口强制 deep 采集后仅发生一次 LLM scoring 调用，再进入 PDF 生成。
 - [ ] 根据真实耗时调整 `single_stage_generation.max_input_chars`、`max_completion_tokens` 和 `timeout`。
 - [x] 已将 `config/agent_llm_config.json` 外层 SP 从约 2 万字符压缩到约 1.7k 字符。
 
@@ -91,7 +91,7 @@ git diff --check
 
 - [x] Reverted the default report flow from multi-round/dimension LLM to one full-evidence LLM call.
 - [x] Added `generate_enterprise_report_single` as the default complete report entry.
-- [x] Default single-stage collection uses `collection_mode=deep` before the one LLM scoring call.
+- [x] Default single-stage report generation forces `collection_mode=deep` before the one LLM scoring call.
 - [x] Removed parallel/two-stage report tools from the default Agent tool list.
 - [ ] Validate in Coze that `generate_enterprise_report_single` is selected by default.
 - [ ] Compare `evidence_collection`, `single_llm_scoring`, `pdf_report`, and total runtime.
