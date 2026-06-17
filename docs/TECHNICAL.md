@@ -93,7 +93,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 配置文件：`config/agent_llm_config.json`
 
 - `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
-- `single_stage_generation.report_llm`：默认单次 LLM 配置。
+- `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒。
 - `single_stage_generation.max_input_chars`：控制完整证据输入体积。
 
 `config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。

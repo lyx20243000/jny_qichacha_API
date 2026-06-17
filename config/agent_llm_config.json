@@ -35,7 +35,7 @@
       "temperature": 0.25,
       "top_p": 0.85,
       "max_completion_tokens": 6000,
-      "timeout": 300,
+      "timeout": 600,
       "thinking": "disabled"
     }
   }

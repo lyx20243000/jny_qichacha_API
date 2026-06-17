@@ -38,7 +38,7 @@ def test_single_stage_llm_config_overrides_base_config():
     cfg = {
         "config": {"model": "base", "temperature": 0.4, "thinking": "disabled"},
         "single_stage_generation": {
-            "report_llm": {"model": "single", "temperature": 0.2, "timeout": 300}
+            "report_llm": {"model": "single", "temperature": 0.2, "timeout": 600}
         },
     }
 
@@ -46,5 +46,5 @@ def test_single_stage_llm_config_overrides_base_config():
 
     assert stage_cfg["model"] == "single"
     assert stage_cfg["temperature"] == 0.2
-    assert stage_cfg["timeout"] == 300
+    assert stage_cfg["timeout"] == 600
     assert stage_cfg["thinking"] == "disabled"

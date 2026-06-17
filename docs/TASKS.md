@@ -43,6 +43,7 @@
 - [x] 已按最新要求撤销默认多轮/多维度 LLM，新增 `generate_enterprise_report_single`，默认 deep 采集全部数据后只调用一次 LLM 生成完整 `scoring_json`。
 - [x] Agent 默认工具列表已移除 `generate_enterprise_report_parallel` 和 `generate_enterprise_report_two_stage`，避免 Coze 默认选到多轮链路。
 - [x] `config/agent_llm_config.json` 已移除 `parallel_generation` / `two_stage_generation` 默认配置，改为 `single_stage_generation`。
+- [x] 单次 LLM 超时已设置为 600 秒。
 
 ## 启信宝白名单
 
