@@ -80,3 +80,11 @@ git diff --check
 - 报告阶段当前是“复用已采集数据”模式；如果 `collect_enterprise_evidence` 没有传出 `qcc_data_json`，报告会继续生成，但不会再自动补查 MCP。
 - 启信宝接口字段结构需要在真实 Coze 环境用生产凭据验证。
 - 两阶段链路当前第一轮失败会停止报告生成；第二轮失败会降级为第一轮评分结果 + 报告工具兜底。上线后需要重点观察第一轮 JSON 合法率。
+## Recent LLM Pipeline Update
+
+- [x] Added `generate_enterprise_report_parallel` as the default complete report entry.
+- [x] Added staggered dimension LLM pipeline: industry, operation, finance, and credit/risk start 3 seconds apart after evidence collection.
+- [x] Added final summary LLM after all dimension LLM tasks finish.
+- [x] Kept `generate_enterprise_report_two_stage` as fallback/detailed mode.
+- [ ] Validate in Coze that `generate_enterprise_report_parallel` is selected by default.
+- [ ] Compare timings for `dimension_llm_total_wall_time`, each dimension elapsed time, `summary_llm`, `pdf_report`, and total runtime.

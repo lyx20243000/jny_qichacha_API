@@ -216,3 +216,16 @@ QCC_MCP_API_KEY06=...
 ```
 
 当 MCP 返回 `code=300008`、积分余额不足或额度不足时，客户端会标记当前 Key 已耗尽并尝试下一个 Key。所有 Key 不可用时，后续 MCP 补查直接跳过，Agent 应转用公开搜索和已采集的启信宝数据。
+## Current Default Report Pipeline
+
+The default complete report tool is `generate_enterprise_report_parallel`.
+Its execution flow is:
+
+1. Call `collect_enterprise_evidence` for subject verification and fixed evidence collection.
+2. Split the collected evidence into four dimension-specific payloads.
+3. Start dimension LLM tasks in the order `industry`, `operation`, `finance`, `credit`, with `parallel_generation.dimension_launch_interval_seconds` controlling the launch gap. The production default is 3 seconds.
+4. Do not stream dimension text to the user; wait for all dimension tasks to finish.
+5. Run the summary LLM after all dimensions are complete.
+6. Merge results with score fields protected, then call `generate_enterprise_report`.
+
+`generate_enterprise_report_two_stage` is retained as a fallback/detailed path.

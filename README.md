@@ -122,3 +122,19 @@ git diff --check
 
 - 技术说明：`docs/TECHNICAL.md`
 - 任务进度：`docs/TASKS.md`
+## Current Default Report Flow
+
+The default enterprise report entry is now `generate_enterprise_report_parallel`.
+After `collect_enterprise_evidence` finishes fixed data collection, the tool starts
+four dimension LLM tasks in this order with a 3-second stagger between launches:
+
+1. industry
+2. operation
+3. finance
+4. credit/risk
+
+The tool does not stream dimension text to the user. It waits until all four
+dimension tasks finish, then runs one summary LLM to produce the final conclusion
+and action recommendation. Finally it calls `generate_enterprise_report` to
+generate the PDF. `generate_enterprise_report_two_stage` is retained as a
+fallback/detailed path.

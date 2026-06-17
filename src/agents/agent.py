@@ -21,6 +21,7 @@ from tools.enterprise_search_tool import (
 )
 from tools.enterprise_fetch_tool import fetch_enterprise_page
 from tools.report_tool import generate_enterprise_report
+from tools.parallel_report_tool import generate_enterprise_report_parallel
 from tools.two_stage_report_tool import generate_enterprise_report_two_stage
 from tools.qcc_mcp_tool import (
     qcc_get_basic_info,
@@ -36,6 +37,13 @@ from tools.qcc_mcp_tool import (
 logger = logging.getLogger(__name__)
 
 LLM_CONFIG = "config/agent_llm_config.json"
+
+PARALLEL_DEFAULT_PROMPT_PREFIX = """# 默认执行入口覆盖
+当用户要求分析企业、生成企业评分或生成PDF报告时，优先调用 generate_enterprise_report_parallel。
+该工具会先完成固定数据采集，再按行业、企业经营、财务、信用/风险四个维度每 3 秒错峰启动一个 LLM 分析任务；等全部维度完成后，再调用汇总 LLM 生成综合结论和行动建议，并调用 generate_enterprise_report 输出 PDF。
+generate_enterprise_report_two_stage 仅作为备用/详细模式，不作为默认入口。
+除非 generate_enterprise_report_parallel 返回需要用户确认主体，否则不要手动拆开调用 collect_enterprise_evidence 和 generate_enterprise_report。
+"""
 
 # 默认保留最近 20 轮对话 (40 条消息)
 MAX_MESSAGES = 40
@@ -86,6 +94,7 @@ def build_agent(ctx=None):
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    cfg["sp"] = PARALLEL_DEFAULT_PROMPT_PREFIX + "\n" + str(cfg.get("sp") or "")
 
     api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY")
     base_url = os.getenv("COZE_INTEGRATION_MODEL_BASE_URL")
@@ -94,6 +103,7 @@ def build_agent(ctx=None):
 
     # 免费渠道工具：固定采集、Coze 搜索、公开互联网搜索、页面抓取和报告生成
     tools = [
+        generate_enterprise_report_parallel,
         generate_enterprise_report_two_stage,
         collect_enterprise_evidence,
         search_enterprise_candidates,
