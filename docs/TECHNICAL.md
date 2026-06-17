@@ -101,6 +101,8 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `parallel_generation.max_input_chars` / `summary_max_input_chars`：控制维度和汇总阶段输入体积。
 - `two_stage_generation.scoring_llm` / `report_llm`：备用两阶段链路配置，默认入口不使用。
 
+`config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不再放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。
+
 默认并发维度链路定义在 `src/services/parallel_dimension_llm_pipeline.py`。它复用 `src/services/two_stage_llm_pipeline.py` 中的 `invoke_stage_json`、`compact_json` 和 LLM 配置读取能力。
 
 备用两阶段链路提示词定义在 `src/services/two_stage_llm_pipeline.py`：
@@ -108,7 +110,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 - `SCORING_CORE_SYSTEM_PROMPT`
 - `REPORT_ENRICHMENT_SYSTEM_PROMPT`
 
-默认并发链路的工具运行公共逻辑位于 `src/tools/tool_runtime_helpers.py`，供 `parallel_report_tool.py` 和 `two_stage_report_tool.py` 共同调用，避免并发工具依赖两阶段模块里的私有函数。`src/agents/agent.py` 只保留简短的默认入口兜底前缀，完整默认入口说明以 `config/agent_llm_config.json` 为准，降低运行时 SP 与配置 SP 冲突风险。
+默认并发链路的工具运行公共逻辑位于 `src/tools/tool_runtime_helpers.py`，供 `parallel_report_tool.py` 和 `two_stage_report_tool.py` 共同调用，避免并发工具依赖两阶段模块里的私有函数。`invoke_langchain_tool` 专用于工具内部编排，优先调用 LangChain tool 的 `.func`，避免内部工具再次进入 `.invoke` 链。`src/agents/agent.py` 只在配置缺失并发默认入口时补充兜底前缀，降低运行时 SP 与配置 SP 冲突风险。
 
 ## 固定采集返回
 

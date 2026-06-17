@@ -57,6 +57,12 @@ class AgentState(MessagesState):
     messages: Annotated[list[AnyMessage], _windowed_messages]
 
 
+def _ensure_parallel_default_prompt(sp: str) -> str:
+    if "generate_enterprise_report_parallel" in sp:
+        return sp
+    return PARALLEL_DEFAULT_PROMPT_PREFIX + "\n" + sp
+
+
 def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
     kwargs = {
         "model": cfg["config"].get("model"),
@@ -93,7 +99,7 @@ def build_agent(ctx=None):
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    cfg["sp"] = PARALLEL_DEFAULT_PROMPT_PREFIX + "\n" + str(cfg.get("sp") or "")
+    cfg["sp"] = _ensure_parallel_default_prompt(str(cfg.get("sp") or ""))
 
     api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY")
     base_url = os.getenv("COZE_INTEGRATION_MODEL_BASE_URL")

@@ -8,6 +8,11 @@ from typing import Any
 
 
 def invoke_langchain_tool(tool_obj: Any, kwargs: dict[str, Any]) -> Any:
+    """Call a LangChain @tool object from inside another tool.
+
+    Prefer `.func` for tool-to-tool orchestration so the inner tool runs as a
+    plain Python function and does not re-enter LangChain's invoke chain.
+    """
     if hasattr(tool_obj, "func") and callable(tool_obj.func):
         return tool_obj.func(**kwargs)
     if hasattr(tool_obj, "invoke") and callable(tool_obj.invoke):

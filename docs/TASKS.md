@@ -43,6 +43,8 @@
 - [x] 保留 `generate_enterprise_report_two_stage` 作为备用/详细模式。
 - [x] 抽取 `src/tools/tool_runtime_helpers.py`，让并发维度工具和两阶段工具共用工具调用、JSON 解析和耗时统计逻辑，避免依赖两阶段模块里的私有函数。
 - [x] 已收敛 Agent 运行时默认入口前缀，并同步 `config/agent_llm_config.json`，避免配置 SP 与运行时前缀产生默认入口冲突。
+- [x] 已压缩外层 Agent SP，将完整评分细则下沉到并发维度 LLM prompt / 备用两阶段 prompt；外层只保留工具路由、主体确认、数据源边界和禁止事项。
+- [x] 已为 `tool_runtime_helpers.invoke_langchain_tool` 增加注释，明确它是工具内部编排直调 `.func` 的 helper，避免误认为要走 LangChain invoke 中间件链。
 
 ## 启信宝白名单
 
@@ -64,6 +66,7 @@
 - [ ] 在 Coze 环境验证 `generate_enterprise_report_parallel` 是否优先被 Agent 调用。
 - [ ] 在 Coze 环境对比并发维度链路与两阶段备用链路的端到端耗时、维度 LLM 墙钟耗时、summary LLM 耗时和 PDF 生成耗时。
 - [ ] 根据真实耗时继续压缩 `config/agent_llm_config.json` 中旧系统提示词，减少外层 Agent prompt 体积。
+- [x] 已将 `config/agent_llm_config.json` 外层 SP 从约 2 万字符压缩到约 1.7k 字符。
 
 ## 本地检查
 
@@ -93,5 +96,6 @@ git diff --check
 - [x] Kept `generate_enterprise_report_two_stage` as fallback/detailed mode.
 - [x] Extracted shared tool runtime helpers to avoid importing private helpers from the two-stage tool.
 - [x] Aligned Agent SP and runtime fallback prefix with the parallel default entry.
+- [x] Reduced outer Agent SP and moved detailed scoring instructions into internal LLM prompts.
 - [ ] Validate in Coze that `generate_enterprise_report_parallel` is selected by default.
 - [ ] Compare timings for `dimension_llm_total_wall_time`, each dimension elapsed time, `summary_llm`, `pdf_report`, and total runtime.

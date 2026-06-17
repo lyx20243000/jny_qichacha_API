@@ -112,6 +112,8 @@ LLM 生成：
 # config 控制外层 Agent；parallel_generation 控制默认并发维度/汇总 LLM；two_stage_generation 保留给备用两阶段链路。
 ```
 
+外层 Agent 的 `sp` 仅保留工具路由、数据源边界、主体确认和禁止事项等短指令。具体四维评分规则已经下沉到 `src/services/parallel_dimension_llm_pipeline.py` 的维度 prompt，以及备用 `src/services/two_stage_llm_pipeline.py`，避免每次外层工具选择都携带大段评分细则。
+
 ## 本地可做的检查
 
 ```bash
