@@ -144,7 +144,7 @@ def _build_chat_openai(stage_config: dict[str, Any], ctx: Any = None):
         "api_key": api_key,
         "base_url": base_url,
         "temperature": stage_config.get("temperature", 0.2),
-        "streaming": False,
+        "streaming": True,
         "timeout": stage_config.get("timeout", 180),
         "extra_body": {"thinking": {"type": stage_config.get("thinking", "disabled")}},
         "default_headers": default_headers(ctx) if ctx else {},
