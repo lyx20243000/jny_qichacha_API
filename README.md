@@ -16,23 +16,21 @@
 
 ## 项目目标
 
-- 根据用户输入的企业名称或统一社会信用代码，默认通过 `generate_enterprise_report_parallel` 端到端生成报告；该工具内部先通过 `collect_enterprise_evidence` 完成主体确认和固定证据采集。
+- 根据用户输入的企业名称或统一社会信用代码，默认通过 `generate_enterprise_report_single` 端到端生成报告；该工具内部先通过 `collect_enterprise_evidence` 完成主体确认和完整证据采集。
 - 主体确认优先使用启信宝 API `1.41` 工商照面；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。
 - 主体确认后按分层策略采集启信宝白名单接口数据：standard 默认先查主体、核心风险和关键资质，并固定补充公开搜索中的行业、工商、财务和发展线索；deep 才进一步扩展到国家企业信用信息公示系统线索、资产负担、土地和案件串联。若启信宝不可用或关键字段缺失较多，standard 会自动提升企查查 MCP 做基础工商/风险/财务补位。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
 - 按行业、企业经营、财务、信用四个维度评分。
 - 输出企业分析结论、数据可信度、财务缺失说明、重点风险和行动建议，并通过 Coze 文档服务生成 PDF 报告链接。
 
-## 错峰并发维度 LLM 生成
+## 单次 LLM 生成
 
-为降低一次性长文本推理耗时，当前默认报告链路使用 `generate_enterprise_report_parallel`：
+当前默认报告链路已撤销多轮/多维度 LLM，改回 `generate_enterprise_report_single`：
 
-1. 固定采集：内部调用 `collect_enterprise_evidence`，得到 `evidence_summary`、`qcc_data_json` 和 `collection_diagnostics`。
-2. 维度拆分：按行业、企业经营、财务、信用/风险四个维度裁剪输入，减少每个 LLM 的上下文体积。
-3. 错峰并发：按 `industry`、`operation`、`finance`、`credit` 顺序启动维度 LLM，默认每 3 秒启动一个，不向用户流式输出维度正文。
-4. 汇总生成：等待四个维度全部完成后，再调用 summary LLM 生成综合结论和行动建议。
-5. 合并与报告：代码合并维度结果和汇总结果，保护四维评分、`red_line_data`、财务缺失字段和诊断字段，再调用 `generate_enterprise_report` 生成 PDF。
+1. 完整采集：内部默认用 `collection_mode=deep` 调用 `collect_enterprise_evidence`，尽量采集启信宝白名单 API、公开搜索和企查查 MCP 补充数据。
+2. 单次 LLM：将完整采集结果压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
+3. 报告生成：调用 `generate_enterprise_report` 计算加权分、兜底补全报告字段并生成 PDF。
 
-`generate_enterprise_report_two_stage` 仍保留为备用/详细模式：先生成紧凑评分 JSON，再补全报告表达。默认入口不再使用两阶段工具。
+并发维度和两阶段相关默认入口已从当前代码中删除；如需追溯，可查看历史提交。
 
 `collect_enterprise_evidence` 当前除原有 `qixin_api`、`qcc_mcp`、`triggered_mcp`、`qcc_data_json` 外，还会返回：
 
@@ -60,10 +58,8 @@
 - 固定证据采集工具：`src/tools/enterprise_evidence_tool.py`
 - 主体消歧工具：`src/tools/enterprise_disambiguate_tool.py`
 - 报告工具：`src/tools/report_tool.py`
-- 默认并发维度报告工具：`src/tools/parallel_report_tool.py`
-- 并发维度 LLM 服务：`src/services/parallel_dimension_llm_pipeline.py`
-- 备用两阶段报告工具：`src/tools/two_stage_report_tool.py`
-- 备用两阶段 LLM 服务：`src/services/two_stage_llm_pipeline.py`
+- 默认单次报告工具：`src/tools/single_stage_report_tool.py`
+- 单次 LLM 服务：`src/services/single_stage_llm_pipeline.py`
 - 工具运行公共 helper：`src/tools/tool_runtime_helpers.py`
 
 当前项目未发现独立的 Coze 工具 schema/manifest 配置文件；工具参数暴露以 LangChain `@tool` 装饰器和 Python 函数签名为准，再由 `src/agents/agent.py` 中 `create_agent(..., tools=[...])` 注册到 Agent。因此 `generate_enterprise_report` 新增 `collection_diagnostics_json` 后，不需要再额外同步一份 Coze 工具参数文件。
@@ -109,10 +105,10 @@ LLM 生成：
 
 ```bash
 # 配置位于 config/agent_llm_config.json
-# config 控制外层 Agent；parallel_generation 控制默认并发维度/汇总 LLM；two_stage_generation 保留给备用两阶段链路。
+# config 控制外层 Agent；single_stage_generation 控制默认单次 LLM。
 ```
 
-外层 Agent 的 `sp` 仅保留工具路由、数据源边界、主体确认和禁止事项等短指令。具体四维评分规则已经下沉到 `src/services/parallel_dimension_llm_pipeline.py` 的维度 prompt，以及备用 `src/services/two_stage_llm_pipeline.py`，避免每次外层工具选择都携带大段评分细则。
+外层 Agent 的 `sp` 仅保留工具路由、数据源边界、主体确认和禁止事项等短指令。具体评分规则由 `src/services/single_stage_llm_pipeline.py` 的单次 LLM prompt 和报告工具执行。
 
 ## 本地可做的检查
 
@@ -130,14 +126,6 @@ git diff --check
 - 任务进度：`docs/TASKS.md`
 ## 当前默认报告流程
 
-默认完整报告入口是 `generate_enterprise_report_parallel`。`collect_enterprise_evidence`
-完成固定采集后，工具会按以下顺序每 3 秒错峰启动一个维度 LLM：
-
-1. industry
-2. operation
-3. finance
-4. credit/risk
-
-维度正文不会流式输出给用户。工具会等待四个维度全部完成，再运行 summary LLM
-生成最终结论和行动建议，最后调用 `generate_enterprise_report` 输出 PDF。
-`generate_enterprise_report_two_stage` 仅保留为备用/详细模式。
+默认完整报告入口是 `generate_enterprise_report_single`。它会先以 `deep`
+模式完成固定证据采集，再一次性调用 LLM 生成完整 `scoring_json`，最后调用
+`generate_enterprise_report` 输出 PDF。

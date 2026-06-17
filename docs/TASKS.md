@@ -35,16 +35,14 @@
 - [x] `generate_enterprise_report` 已支持可选传入 `collection_diagnostics_json`，用于复用 `recommended_next_step` / `review_reasons` 补全报告动作建议。
 - [x] 删除 CNBizAPI 兼容代码和相关文档口径，不再保留该备用链路。
 - [x] 已确认当前 Coze 部署链路下，工具参数暴露直接跟随 LangChain `@tool` + 函数签名；未发现需要额外维护的工具 schema 配置文件。
-- [x] 新增 `generate_enterprise_report_two_stage`，把完整报告生成拆成“固定采集 -> 第一轮紧凑评分 -> 第二轮报告补全 -> 合并 -> PDF”。
-- [x] 新增 `src/services/two_stage_llm_pipeline.py`，集中管理两轮 prompt、LLM 配置读取、JSON 抽取和合并保护逻辑。
-- [x] 外层 Agent 已优先注册默认并发维度报告工具，并关闭外层 `thinking`、降低外层输出 token 上限。
-- [x] 已补充 `tests/test_two_stage_llm_pipeline.py`，覆盖 JSON 抽取、合并保护和降级摘要逻辑。
-- [x] 新增 `generate_enterprise_report_parallel` 作为默认完整报告入口，采集后按行业、经营、财务、信用/风险四个维度错峰并发分析，再由 summary LLM 汇总并生成 PDF。
-- [x] 保留 `generate_enterprise_report_two_stage` 作为备用/详细模式。
-- [x] 抽取 `src/tools/tool_runtime_helpers.py`，让并发维度工具和两阶段工具共用工具调用、JSON 解析和耗时统计逻辑，避免依赖两阶段模块里的私有函数。
+- [x] 历史上曾实现两阶段和并发维度 LLM 链路；按最新要求已撤销默认多轮/多维度 LLM，并删除相关默认入口代码。
+- [x] 抽取 `src/tools/tool_runtime_helpers.py`，用于当前单次工具内部复用采集工具和报告工具。
 - [x] 已收敛 Agent 运行时默认入口前缀，并同步 `config/agent_llm_config.json`，避免配置 SP 与运行时前缀产生默认入口冲突。
-- [x] 已压缩外层 Agent SP，将完整评分细则下沉到并发维度 LLM prompt / 备用两阶段 prompt；外层只保留工具路由、主体确认、数据源边界和禁止事项。
+- [x] 已压缩外层 Agent SP，将完整评分细则下沉到单次 LLM prompt；外层只保留工具路由、主体确认、数据源边界和禁止事项。
 - [x] 已为 `tool_runtime_helpers.invoke_langchain_tool` 增加注释，明确它是工具内部编排直调 `.func` 的 helper，避免误认为要走 LangChain invoke 中间件链。
+- [x] 已按最新要求撤销默认多轮/多维度 LLM，新增 `generate_enterprise_report_single`，默认 deep 采集全部数据后只调用一次 LLM 生成完整 `scoring_json`。
+- [x] Agent 默认工具列表已移除 `generate_enterprise_report_parallel` 和 `generate_enterprise_report_two_stage`，避免 Coze 默认选到多轮链路。
+- [x] `config/agent_llm_config.json` 已移除 `parallel_generation` / `two_stage_generation` 默认配置，改为 `single_stage_generation`。
 
 ## 启信宝白名单
 
@@ -63,9 +61,9 @@
 - [ ] 在 Coze 环境验证未传 `qcc_data_json` 时，报告阶段不会自动回查企查查 MCP。
 - [ ] 验证启信宝接口 `32.1` 的“地产行政处罚”在报告中不会被误写成通用行政处罚。
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
-- [ ] 在 Coze 环境验证 `generate_enterprise_report_parallel` 是否优先被 Agent 调用。
-- [ ] 在 Coze 环境对比并发维度链路与两阶段备用链路的端到端耗时、维度 LLM 墙钟耗时、summary LLM 耗时和 PDF 生成耗时。
-- [ ] 根据真实耗时继续压缩 `config/agent_llm_config.json` 中旧系统提示词，减少外层 Agent prompt 体积。
+- [ ] 在 Coze 环境验证 `generate_enterprise_report_single` 是否优先被 Agent 调用。
+- [ ] 在 Coze 环境验证默认 deep 采集后仅发生一次 LLM scoring 调用，再进入 PDF 生成。
+- [ ] 根据真实耗时调整 `single_stage_generation.max_input_chars`、`max_completion_tokens` 和 `timeout`。
 - [x] 已将 `config/agent_llm_config.json` 外层 SP 从约 2 万字符压缩到约 1.7k 字符。
 
 ## 本地检查
@@ -86,16 +84,13 @@ git diff --check
 - `standard` 模式当前固定公开搜索 `industry/basic/finance/development`，`gsxt` 相关线索属于 `deep` 固定链路或 Agent 按需补查，不应在文档中写成默认必查。
 - 报告阶段当前是“复用已采集数据”模式；如果 `collect_enterprise_evidence` 没有传出 `qcc_data_json`，报告会继续生成，但不会再自动补查 MCP。
 - 启信宝接口字段结构需要在真实 Coze 环境用生产凭据验证。
-- 默认并发维度链路依赖四个维度 LLM 和 summary LLM 均返回合法 JSON；上线后需要重点观察各维度 JSON 合法率、summary 合并质量和 `dimension_llm_total_wall_time`。
-- 两阶段链路当前第一轮失败会停止报告生成；第二轮失败会降级为第一轮评分结果 + 报告工具兜底。它现在是备用/详细模式，仍需保留可用性观察。
+- 单次 LLM 链路重新引入一次性长文本生成风险；上线后需要观察 `single_llm_scoring` 耗时、JSON 合法率和 `max_input_chars` 截断是否影响报告质量。
+
 ## Recent LLM Pipeline Update
 
-- [x] Added `generate_enterprise_report_parallel` as the default complete report entry.
-- [x] Added staggered dimension LLM pipeline: industry, operation, finance, and credit/risk start 3 seconds apart after evidence collection.
-- [x] Added final summary LLM after all dimension LLM tasks finish.
-- [x] Kept `generate_enterprise_report_two_stage` as fallback/detailed mode.
-- [x] Extracted shared tool runtime helpers to avoid importing private helpers from the two-stage tool.
-- [x] Aligned Agent SP and runtime fallback prefix with the parallel default entry.
-- [x] Reduced outer Agent SP and moved detailed scoring instructions into internal LLM prompts.
-- [ ] Validate in Coze that `generate_enterprise_report_parallel` is selected by default.
-- [ ] Compare timings for `dimension_llm_total_wall_time`, each dimension elapsed time, `summary_llm`, `pdf_report`, and total runtime.
+- [x] Reverted the default report flow from multi-round/dimension LLM to one full-evidence LLM call.
+- [x] Added `generate_enterprise_report_single` as the default complete report entry.
+- [x] Default single-stage collection uses `collection_mode=deep` before the one LLM scoring call.
+- [x] Removed parallel/two-stage report tools from the default Agent tool list.
+- [ ] Validate in Coze that `generate_enterprise_report_single` is selected by default.
+- [ ] Compare `evidence_collection`, `single_llm_scoring`, `pdf_report`, and total runtime.

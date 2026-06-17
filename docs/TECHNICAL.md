@@ -17,11 +17,10 @@ git diff --check
 1. 用户通过 `/run`、`/stream_run`、`/async_run` 或 OpenAI 兼容接口提交企业查询请求；其中 `/stream_run` 在长耗时执行期间会每 10 秒输出一次 `progress` SSE 事件，用于告知上游任务仍在进行中。
 2. `src/main.py` 创建 Coze 运行上下文和 LangGraph run config。
 3. `src/agents/agent.py` 根据 `config/agent_llm_config.json` 构建 Agent 和工具列表。
-4. 完整企业分析默认调用 `generate_enterprise_report_parallel`。
-5. `generate_enterprise_report_parallel` 内部调用 `collect_enterprise_evidence`，完成主体确认、启信宝白名单 API 固定采集、公开搜索、按模式决定是否追加国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
-6. 采集完成后，代码按行业、企业经营、财务、信用/风险四个维度裁剪输入，降低单个 LLM 的上下文体积。
-7. 维度 LLM 按 `industry`、`operation`、`finance`、`credit` 顺序错峰启动，默认每 3 秒启动一个；维度正文不向用户流式输出。
-8. 等全部维度完成后，再调用 summary LLM 生成综合结论和行动建议；代码合并维度结果与汇总结果，保护四维评分、`red_line_data`、财务缺失字段和诊断字段，最后调用 `generate_enterprise_report` 输出 PDF。
+4. 完整企业分析默认调用 `generate_enterprise_report_single`。
+5. `generate_enterprise_report_single` 内部默认以 `collection_mode=deep` 调用 `collect_enterprise_evidence`，完成主体确认、启信宝白名单 API 固定采集、公开搜索、国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
+6. 采集完成后，代码把完整证据压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
+7. `generate_enterprise_report` 基于 `scoring_json`、`qcc_data_json` 和 `collection_diagnostics_json` 计算加权分、兜底补全报告字段并输出 PDF。
 
 ## 数据源策略
 
@@ -68,8 +67,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 当前 Agent 暴露工具包括：
 
-- `generate_enterprise_report_parallel`
-- `generate_enterprise_report_two_stage`
+- `generate_enterprise_report_single`
 - `collect_enterprise_evidence`
 - `search_enterprise_candidates`
 - `search_industry_info`
@@ -95,22 +93,14 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 配置文件：`config/agent_llm_config.json`
 
 - `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
-- `parallel_generation.dimension_llm`：默认维度 LLM 共享配置。
-- `parallel_generation.summary_llm`：默认汇总 LLM 配置。
-- `parallel_generation.dimension_launch_interval_seconds`：维度 LLM 启动间隔，生产默认 3 秒。
-- `parallel_generation.max_input_chars` / `summary_max_input_chars`：控制维度和汇总阶段输入体积。
-- `two_stage_generation.scoring_llm` / `report_llm`：备用两阶段链路配置，默认入口不使用。
+- `single_stage_generation.report_llm`：默认单次 LLM 配置。
+- `single_stage_generation.max_input_chars`：控制完整证据输入体积。
 
-`config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不再放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。
+`config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。
 
-默认并发维度链路定义在 `src/services/parallel_dimension_llm_pipeline.py`。它复用 `src/services/two_stage_llm_pipeline.py` 中的 `invoke_stage_json`、`compact_json` 和 LLM 配置读取能力。
+默认单次链路定义在 `src/services/single_stage_llm_pipeline.py`。它复用 `src/services/llm_json_pipeline.py` 中的 `invoke_stage_json` 和 `compact_json` 通用能力，配置只读取 `single_stage_generation`。
 
-备用两阶段链路提示词定义在 `src/services/two_stage_llm_pipeline.py`：
-
-- `SCORING_CORE_SYSTEM_PROMPT`
-- `REPORT_ENRICHMENT_SYSTEM_PROMPT`
-
-默认并发链路的工具运行公共逻辑位于 `src/tools/tool_runtime_helpers.py`，供 `parallel_report_tool.py` 和 `two_stage_report_tool.py` 共同调用，避免并发工具依赖两阶段模块里的私有函数。`invoke_langchain_tool` 专用于工具内部编排，优先调用 LangChain tool 的 `.func`，避免内部工具再次进入 `.invoke` 链。`src/agents/agent.py` 只在配置缺失并发默认入口时补充兜底前缀，降低运行时 SP 与配置 SP 冲突风险。
+工具运行公共逻辑位于 `src/tools/tool_runtime_helpers.py`。`invoke_langchain_tool` 专用于工具内部编排，优先调用 LangChain tool 的 `.func`，避免内部工具再次进入 `.invoke` 链。`src/agents/agent.py` 只在配置缺失单次默认入口时补充兜底前缀，降低运行时 SP 与配置 SP 冲突风险。
 
 ## 固定采集返回
 
@@ -226,14 +216,12 @@ QCC_MCP_API_KEY06=...
 当 MCP 返回 `code=300008`、积分余额不足或额度不足时，客户端会标记当前 Key 已耗尽并尝试下一个 Key。所有 Key 不可用时，后续 MCP 补查直接跳过，Agent 应转用公开搜索和已采集的启信宝数据。
 ## Current Default Report Pipeline
 
-The default complete report tool is `generate_enterprise_report_parallel`.
+The default complete report tool is `generate_enterprise_report_single`.
 Its execution flow is:
 
-1. Call `collect_enterprise_evidence` for subject verification and fixed evidence collection.
-2. Split the collected evidence into four dimension-specific payloads.
-3. Start dimension LLM tasks in the order `industry`, `operation`, `finance`, `credit`, with `parallel_generation.dimension_launch_interval_seconds` controlling the launch gap. The production default is 3 seconds.
-4. Do not stream dimension text to the user; wait for all dimension tasks to finish.
-5. Run the summary LLM after all dimensions are complete.
-6. Merge results with score fields protected, then call `generate_enterprise_report`.
+1. Call `collect_enterprise_evidence` with `collection_mode=deep` for subject verification and full fixed evidence collection.
+2. Compress the full evidence payload into one bounded LLM input.
+3. Call one LLM once to produce the complete `scoring_json`.
+4. Call `generate_enterprise_report` to calculate scores, apply report fallbacks, and generate the PDF.
 
-`generate_enterprise_report_two_stage` is retained as a fallback/detailed path.
+Parallel dimension and two-stage code is kept for traceability, but those tools are no longer registered in the default Agent tool list.

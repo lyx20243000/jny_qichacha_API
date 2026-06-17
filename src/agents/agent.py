@@ -21,8 +21,7 @@ from tools.enterprise_search_tool import (
 )
 from tools.enterprise_fetch_tool import fetch_enterprise_page
 from tools.report_tool import generate_enterprise_report
-from tools.parallel_report_tool import generate_enterprise_report_parallel
-from tools.two_stage_report_tool import generate_enterprise_report_two_stage
+from tools.single_stage_report_tool import generate_enterprise_report_single
 from tools.qcc_mcp_tool import (
     qcc_get_basic_info,
     qcc_get_finance_info,
@@ -38,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 LLM_CONFIG = "config/agent_llm_config.json"
 
-PARALLEL_DEFAULT_PROMPT_PREFIX = (
+SINGLE_STAGE_DEFAULT_PROMPT_PREFIX = (
     "# 默认入口兜底\n"
-    "企业分析、评分和PDF报告默认优先调用 generate_enterprise_report_parallel；"
-    "generate_enterprise_report_two_stage 仅作为备用/详细模式。\n"
+    "企业分析、评分和PDF报告默认优先调用 generate_enterprise_report_single；"
+    "该工具会完整采集数据后只调用一次 LLM 生成 scoring_json。\n"
 )
 
 # 默认保留最近 20 轮对话 (40 条消息)
@@ -57,10 +56,10 @@ class AgentState(MessagesState):
     messages: Annotated[list[AnyMessage], _windowed_messages]
 
 
-def _ensure_parallel_default_prompt(sp: str) -> str:
-    if "generate_enterprise_report_parallel" in sp:
+def _ensure_single_stage_default_prompt(sp: str) -> str:
+    if "generate_enterprise_report_single" in sp:
         return sp
-    return PARALLEL_DEFAULT_PROMPT_PREFIX + "\n" + sp
+    return SINGLE_STAGE_DEFAULT_PROMPT_PREFIX + "\n" + sp
 
 
 def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
@@ -99,7 +98,7 @@ def build_agent(ctx=None):
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    cfg["sp"] = _ensure_parallel_default_prompt(str(cfg.get("sp") or ""))
+    cfg["sp"] = _ensure_single_stage_default_prompt(str(cfg.get("sp") or ""))
 
     api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY")
     base_url = os.getenv("COZE_INTEGRATION_MODEL_BASE_URL")
@@ -108,8 +107,7 @@ def build_agent(ctx=None):
 
     # 免费渠道工具：固定采集、Coze 搜索、公开互联网搜索、页面抓取和报告生成
     tools = [
-        generate_enterprise_report_parallel,
-        generate_enterprise_report_two_stage,
+        generate_enterprise_report_single,
         collect_enterprise_evidence,
         search_enterprise_candidates,
         search_industry_info,
