@@ -16,17 +16,37 @@
 
 ## 项目目标
 
-- 根据用户输入的企业名称或统一社会信用代码，先通过 `collect_enterprise_evidence` 完成主体确认和固定证据采集。
+- 根据用户输入的企业名称或统一社会信用代码，默认通过 `generate_enterprise_report_two_stage` 端到端生成报告；该工具内部先通过 `collect_enterprise_evidence` 完成主体确认和固定证据采集。
 - 主体确认优先使用启信宝 API `1.41` 工商照面；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。
 - 主体确认后按分层策略采集启信宝白名单接口数据：standard 默认先查主体、核心风险和关键资质，并固定补充公开搜索中的行业、工商、财务和发展线索；deep 才进一步扩展到国家企业信用信息公示系统线索、资产负担、土地和案件串联。若启信宝不可用或关键字段缺失较多，standard 会自动提升企查查 MCP 做基础工商/风险/财务补位。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
 - 按行业、企业经营、财务、信用四个维度评分。
 - 输出企业分析结论、数据可信度、财务缺失说明、重点风险和行动建议，并通过 Coze 文档服务生成 PDF 报告链接。
 
+## 两阶段 LLM 生成
+
+为降低一次性长文本推理耗时，当前默认报告链路新增 `generate_enterprise_report_two_stage`：
+
+1. 固定采集：内部调用 `collect_enterprise_evidence`，得到 `evidence_summary`、`qcc_data_json` 和 `collection_diagnostics`。
+2. 第一轮 LLM：只生成紧凑 `scoring_core_json`，负责四维评分、短 `basis`、红线字段和核心行动建议。
+3. 第二轮 LLM：只生成 `report_enrichment_json`，补全绿电适配、履约能力、KYB 专项风险、数据来源摘要和报告表达，不允许改分。
+4. 合并与报告：代码合并两轮 JSON，保护第一轮分数和红线字段，再调用 `generate_enterprise_report` 生成 PDF。
+
+如果第二轮报告补全失败，工具会降级使用第一轮评分 JSON 和报告工具现有兜底逻辑继续生成简版报告；如果第一轮评分失败，则不会生成报告。
+
 `collect_enterprise_evidence` 当前除原有 `qixin_api`、`qcc_mcp`、`triggered_mcp`、`qcc_data_json` 外，还会返回：
 
+- `evidence_summary`：面向评分阶段的紧凑摘要，当前按 `subject_profile`、`official_structured_summary`、`official_search_summary`、`operation_signal_summary`、`finance_signal_summary`、`risk_signal_summary`、`search_signal_summary`、`field_gaps`、`conflict_flags`、`scoring_hints` 分层组织。
+- `search_evidence`：公开搜索结构化结果，不再只是纯文本；每个分组都会带 `query`、`profile_name`、`search_type`、`summary`、`items`、`stats`，便于后续按权威度、官网命中、GSXT 命中和内容命中继续判断。
 - `collection_diagnostics`：采集诊断摘要，汇总启信宝是否熔断/提前终止、MCP 是否自动补位、缺失字段数量、来源冲突数量和是否建议人工复核。
+- `collection_diagnostics.search`：搜索侧诊断，包含分组、官方命中、高权威命中、正文命中、官网命中和 GSXT 命中。
+- `collection_diagnostics.module_completeness` / `recommended_next_step`：用于提示当前是继续评分、触发 deep 还是建议人工复核。
 - `qcc_data_json.field_sources`：关键字段最终取值来自哪个渠道。
 - `qcc_data_json.source_conflicts`：多渠道都返回了值但内容不一致时的冲突摘要，便于报告解释和人工复核。
+
+当前 `generate_enterprise_report` 除了建议继续传入 `qcc_data_json` 外，也建议一并传入 `collection_diagnostics_json`。这样报告阶段可以继续复用：
+
+- `recommended_next_step`：把“继续评分 / 补充 deep / 人工复核”映射到 `action_recommendation.next_action`
+- `review_reasons`：把采集缺口或冲突原因补进 `action_recommendation.key_risks`
 
 ## 关键入口
 
@@ -39,6 +59,10 @@
 - 固定证据采集工具：`src/tools/enterprise_evidence_tool.py`
 - 主体消歧工具：`src/tools/enterprise_disambiguate_tool.py`
 - 报告工具：`src/tools/report_tool.py`
+- 两阶段报告工具：`src/tools/two_stage_report_tool.py`
+- 两阶段 LLM 服务：`src/services/two_stage_llm_pipeline.py`
+
+当前项目未发现独立的 Coze 工具 schema/manifest 配置文件；工具参数暴露以 LangChain `@tool` 装饰器和 Python 函数签名为准，再由 `src/agents/agent.py` 中 `create_agent(..., tools=[...])` 注册到 Agent。因此 `generate_enterprise_report` 新增 `collection_diagnostics_json` 后，不需要再额外同步一份 Coze 工具参数文件。
 
 ## 环境变量
 
@@ -75,6 +99,13 @@ ENTERPRISE_COLLECTION_MODE=standard
 EVIDENCE_ITEM_TIMEOUT_SECONDS=12
 EVIDENCE_GROUP_TIMEOUT_SECONDS=35
 EVIDENCE_FIELD_MAX_CHARS=2500
+```
+
+LLM 生成：
+
+```bash
+# 配置位于 config/agent_llm_config.json
+# config 控制外层 Agent；two_stage_generation.scoring_llm / report_llm 分别控制两轮内部 LLM。
 ```
 
 ## 本地可做的检查

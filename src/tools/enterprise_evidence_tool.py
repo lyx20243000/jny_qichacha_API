@@ -29,7 +29,7 @@ from tools.enterprise_disambiguate_tool import (
     _normalize_social_credit_code,
     _strip_admin_prefix,
 )
-from tools.enterprise_search_tool import _do_web_search
+from tools.enterprise_search_tool import _do_web_search, _do_web_search_structured
 from tools.qcc_mcp_tool import _safe_call
 from services.qixin_openapi_client import (
     get_qixin_error_info,
@@ -303,13 +303,34 @@ def _normalize_collection_mode(collection_mode: str = "") -> str:
 def _collect_search_evidence(enterprise_name: str, collection_mode: str = "standard") -> dict:
     """固定采集公开搜索证据。"""
     all_queries = {
-        "industry": f"{enterprise_name} 所属行业 行业规模 增速 竞争格局 绿电需求 碳足迹 出口 欧盟 日本 韩国 ESG 绿色工厂 绿色供应链 用电量 政策",
-        "basic": f"{enterprise_name} 工商信息 统一社会信用代码 成立时间 注册资本 法定代表人 经营范围 企业性质 外资 台资 港澳台投资 母公司 实际控制人 最终受益人 股权穿透 企查查",
-        "risk": f"{enterprise_name} 失信 行政处罚 经营异常 法律诉讼 信用评级 被执行 股权出质 动产抵押 欠税 环保处罚 安全生产处罚 税务处罚 产品质量处罚 劳动纠纷",
-        "finance": f"{enterprise_name} 年营收 营业收入 年产值 销售额 总投资 固定资产投资 资产规模 净利润 现金流 资产负债率 年报 参保人数 纳税证明 融资 担保",
-        "development": f"{enterprise_name} 发展动态 核心客户 核心供应商 生产基地 厂房 冷链 仓储 产能 招投标 中标 出口 龙头企业 创新型中小企业 高成长性企业 绿色工厂 ISO HACCP 对外投资 知识产权 专利 技术实力",
-        "gsxt": f"site:gsxt.gov.cn {enterprise_name}",
-        "gsxt_risk": f"{enterprise_name} 行政处罚 经营异常 严重违法失信 国家企业信用信息公示系统",
+        "industry": {
+            "query": f"{enterprise_name} 所属行业 行业规模 增速 竞争格局 绿电需求 碳足迹 出口 欧盟 日本 韩国 ESG 绿色工厂 绿色供应链 用电量 政策",
+            "profile_name": "industry",
+        },
+        "basic": {
+            "query": f"{enterprise_name} 工商信息 统一社会信用代码 成立时间 注册资本 法定代表人 经营范围 企业性质 外资 台资 港澳台投资 母公司 实际控制人 最终受益人 股权穿透 企查查",
+            "profile_name": "basic",
+        },
+        "risk": {
+            "query": f"{enterprise_name} 失信 行政处罚 经营异常 法律诉讼 信用评级 被执行 股权出质 动产抵押 欠税 环保处罚 安全生产处罚 税务处罚 产品质量处罚 劳动纠纷",
+            "profile_name": "risk",
+        },
+        "finance": {
+            "query": f"{enterprise_name} 年营收 营业收入 年产值 销售额 总投资 固定资产投资 资产规模 净利润 现金流 资产负债率 年报 参保人数 纳税证明 融资 担保",
+            "profile_name": "finance",
+        },
+        "development": {
+            "query": f"{enterprise_name} 发展动态 核心客户 核心供应商 生产基地 厂房 冷链 仓储 产能 招投标 中标 出口 龙头企业 创新型中小企业 高成长性企业 绿色工厂 ISO HACCP 对外投资 知识产权 专利 技术实力",
+            "profile_name": "development",
+        },
+        "gsxt": {
+            "query": f"site:gsxt.gov.cn {enterprise_name}",
+            "profile_name": "gsxt_official",
+        },
+        "gsxt_risk": {
+            "query": f"{enterprise_name} 行政处罚 经营异常 严重违法失信 国家企业信用信息公示系统",
+            "profile_name": "gsxt_risk",
+        },
     }
 
     mode_keys = {
@@ -328,8 +349,14 @@ def _collect_search_evidence(enterprise_name: str, collection_mode: str = "stand
 
     return _run_named_calls(
         {
-            name: (lambda q=query, n=name: _do_web_search(q, count=_search_count(n)))
-            for name, query in queries.items()
+            name: (
+                lambda payload=query_payload, n=name: _do_web_search_structured(
+                    payload["query"],
+                    profile_name=payload["profile_name"],
+                    count=_search_count(n),
+                )
+            )
+            for name, query_payload in queries.items()
         },
         max_workers=3,
     )
@@ -521,8 +548,33 @@ def _should_collect_operation_detail(qcc_mcp: dict, search_evidence: dict, colle
     operation = qcc_mcp.get("operation", {})
     if any(operation.get(key) and not _is_unknown_or_error(operation.get(key)) for key in ("招投标记录", "资质认证", "荣誉信息")):
         return False
-    development = str(search_evidence.get("development", ""))
+    development = json.dumps(search_evidence.get("development", {}), ensure_ascii=False)
     return any(keyword in development for keyword in ("专利", "知识产权", "招聘", "中标", "荣誉", "资质", "高新", "专精特新"))
+
+
+def _search_items(search_evidence: dict, key: str) -> list[dict]:
+    group = search_evidence.get(key, {})
+    if isinstance(group, dict):
+        return group.get("items", []) or []
+    return []
+
+
+def _search_stats(search_evidence: dict, key: str) -> dict:
+    group = search_evidence.get(key, {})
+    if isinstance(group, dict):
+        return group.get("stats", {}) or {}
+    return {}
+
+
+def _search_texts(search_evidence: dict, *keys: str) -> str:
+    parts = []
+    for key in keys:
+        for item in _search_items(search_evidence, key):
+            parts.extend(
+                str(item.get(field, "") or "")
+                for field in ("title", "snippet", "summary", "content")
+            )
+    return " ".join(parts)
 
 
 def _should_collect_mcp_standard_seed(qixin_api: dict) -> bool:
@@ -619,6 +671,7 @@ def _build_collection_diagnostics(
     qixin_api: dict,
     qcc_mcp: dict,
     triggered_mcp: dict,
+    search_evidence: dict,
     qcc_data_json: dict,
     collection_mode: str,
 ) -> dict:
@@ -680,6 +733,27 @@ def _build_collection_diagnostics(
     if critical_conflict:
         reasons.append("核心字段来源冲突")
 
+    search_groups = [key for key, value in search_evidence.items() if key != "_meta" and isinstance(value, dict)]
+    official_hits = sum(_search_stats(search_evidence, key).get("official_hits", 0) for key in search_groups)
+    high_auth_hits = sum(_search_stats(search_evidence, key).get("high_auth_hits", 0) for key in search_groups)
+    content_hits = sum(_search_stats(search_evidence, key).get("content_hits", 0) for key in search_groups)
+    website_hit = any("官网" in _search_texts(search_evidence, "basic", "development") for _ in [0])
+    gsxt_hit = _search_stats(search_evidence, "gsxt").get("result_count", 0) > 0
+
+    completeness = {
+        "subject": round(max(0, min(1, 1 - (1 if _is_unknown_or_error(qcc_data_json.get("registration")) else 0) / 1)), 2),
+        "risk": round(max(0, min(1, 1 - (sum(1 for key in ("dishonest", "business_exception", "serious_violation", "high_consumption") if _is_unknown_or_error(qcc_data_json.get(key))) / 4))), 2),
+        "finance": round(max(0, min(1, 1 - (sum(1 for key in ("financial", "credit_eval") if _is_unknown_or_error(qcc_data_json.get(key))) / 2))), 2),
+        "operation": round(max(0, min(1, 1 - (sum(1 for key in ("bidding", "qualifications", "recruitment", "news_sentiment") if _is_unknown_or_error(qcc_data_json.get(key))) / 4))), 2),
+        "related_party": round(max(0, min(1, 1 - (sum(1 for key in ("shareholder", "actual_controller") if _is_unknown_or_error(qcc_data_json.get(key))) / 2))), 2),
+    }
+
+    recommended_next_step = "continue_scoring"
+    if needs_review:
+        recommended_next_step = "human_review"
+    elif collection_mode != "deep" and (missing_count >= 6 or official_hits == 0 and high_auth_hits == 0):
+        recommended_next_step = "trigger_deep"
+
     return {
         "qixin": {
             "fatal": bool(qixin_fatal),
@@ -695,11 +769,22 @@ def _build_collection_diagnostics(
             "seed_triggered": mcp_seed_triggered,
             "collected_groups": mcp_groups,
         },
+        "search": {
+            "groups": search_groups,
+            "official_hits": official_hits,
+            "high_auth_hits": high_auth_hits,
+            "content_hits": content_hits,
+            "website_hit": website_hit,
+            "gsxt_hit": gsxt_hit,
+        },
         "field_source_summary": source_counts,
+        "module_completeness": completeness,
         "missing_or_unknown_fields_count": missing_count,
+        "missing_or_unknown_fields": missing_fields[:20],
         "source_conflict_count": conflict_count,
         "needs_human_review": needs_review,
         "review_reasons": reasons,
+        "recommended_next_step": recommended_next_step,
         "collection_mode": collection_mode,
     }
 
@@ -726,38 +811,129 @@ def _build_evidence_summary(
             if _is_unknown_or_error(value):
                 missing_or_unknown.append(f"{group_name}.{key}")
 
+    qixin_basic_text = qixin_api.get("工商照面(API 1.41)", "")
+    finance_text = finance.get("财务数据", "")
+    development_items = _search_items(search_evidence, "development")
+    industry_items = _search_items(search_evidence, "industry")
+    risk_items = _search_items(search_evidence, "risk")
+    gsxt_items = _search_items(search_evidence, "gsxt")
+    qcc_data_json = _build_qcc_data_json(qcc_mcp, qixin_api, triggered_mcp)
+    conflict_flags = [
+        {
+            "field": item.get("field", ""),
+            "sources": [src.get("source", "") for src in item.get("sources", []) if isinstance(src, dict)],
+        }
+        for item in qcc_data_json.get("source_conflicts", [])[:8]
+        if isinstance(item, dict)
+    ]
+
     return {
         "collection_mode": collection_mode,
-        "enterprise_name": identity.get("enterprise_name", ""),
-        "unified_social_credit_code": identity.get("unified_social_credit_code", ""),
-        "match_source": identity.get("match_source", ""),
-        "priority_sources": ["启信宝API 1.41主体确认", "企查查MCP主体确认回退", "启信宝白名单API固定结构化采集", "国家企业信用信息公示系统/公开搜索", "企查查MCP缺失字段补查"],
-        "qixin_api_checks": {
-            "basic_1_41": _shorten(qixin_api.get("工商照面(API 1.41)", "")),
-            "business_exception_1_55": _shorten(qixin_api.get("经营异常(API 1.55)", "")),
-            "dishonest_5_5": _shorten(qixin_api.get("失信被执行(API 5.5)", "")),
-            "executed_17_5": _shorten(qixin_api.get("被执行企业(API 17.5)", "")),
-            "serious_violation_56_1": _shorten(qixin_api.get("严重违法(API 56.1)", "")),
-            "tax_environment": _shorten(qixin_api.get("欠税信息(API 20.1)", "") or qixin_api.get("环保处罚(API 51.1)", "")),
+        "subject_profile": {
+            "enterprise_name": identity.get("enterprise_name", ""),
+            "unified_social_credit_code": identity.get("unified_social_credit_code", ""),
+            "match_source": identity.get("match_source", ""),
+            "match_reason": identity.get("match_reason", ""),
+            "confidence": identity.get("confidence", ""),
+            "registration": _shorten(qixin_basic_text or basic.get("工商登记", "")),
         },
-        "qcc_registration": _shorten(basic.get("工商登记", "")),
-        "core_risks": {key: _shorten(risk.get(key, "")) for key in risk_keys},
-        "finance": _shorten(finance.get("财务数据", "")),
-        "operation": {
-            "招投标记录": _shorten(operation.get("招投标记录", "")),
-            "资质认证": _shorten(operation.get("资质认证", "")),
-            "荣誉信息": _shorten(operation.get("荣誉信息", "")),
+        "official_structured_summary": {
+            "qixin_basic": _shorten(qixin_basic_text),
+            "qixin_core_risk": {
+                "business_exception": _shorten(qixin_api.get("经营异常(API 1.55)", "")),
+                "dishonest": _shorten(qixin_api.get("失信被执行(API 5.5)", "")),
+                "executed": _shorten(qixin_api.get("被执行企业(API 17.5)", "")),
+                "serious_violation": _shorten(qixin_api.get("严重违法(API 56.1)", "")),
+                "tax_environment": _shorten(qixin_api.get("欠税信息(API 20.1)", "") or qixin_api.get("环保处罚(API 51.1)", "")),
+            },
+            "mcp_structured": {
+                "shareholder": _shorten(basic.get("股东结构", "")),
+                "actual_controller": _shorten(basic.get("实际控制人", "")),
+                "financial": _shorten(finance_text),
+                "operation": _shorten(operation.get("资质认证", "") or operation.get("招投标记录", "")),
+            },
         },
-        "search_highlights": {
-            key: _shorten(search_evidence.get(key, ""))
-            for key in ("industry", "basic", "risk", "finance", "development", "gsxt")
-            if search_evidence.get(key)
+        "official_search_summary": {
+            "gsxt_hits": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in gsxt_items[:3]
+            ],
+            "risk_hits": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in risk_items[:3]
+            ],
         },
-        "triggered_collection": triggered_mcp.get("_meta", {}),
-        "qixin_collection_meta": qixin_api.get("_meta", {}) if isinstance(qixin_api, dict) else {},
-        "qixin_fatal_error": qixin_api.get("_fatal_error", {}) if isinstance(qixin_api, dict) else {},
-        "missing_or_unknown_fields": missing_or_unknown[:20],
-        "analysis_hint": "优先基于本摘要评分；只有摘要证据不足或冲突时，再读取 search_evidence/qcc_mcp/triggered_mcp 原文。",
+        "operation_signal_summary": {
+            "development_signals": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in development_items[:4]
+            ],
+            "operation_structured": {
+                "bidding": _shorten(operation.get("招投标记录", "")),
+                "qualifications": _shorten(operation.get("资质认证", "")),
+                "honor": _shorten(operation.get("荣誉信息", "")),
+                "recruitment": _shorten(operation.get("招聘信息", "")),
+            },
+        },
+        "finance_signal_summary": {
+            "financial_structured": _shorten(finance_text),
+            "public_finance_signals": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in _search_items(search_evidence, "finance")[:3]
+            ],
+        },
+        "risk_signal_summary": {
+            "core_risks": {key: _shorten(risk.get(key, "")) for key in risk_keys},
+            "triggered_collection": triggered_mcp.get("_meta", {}),
+        },
+        "search_signal_summary": {
+            "industry_signals": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in industry_items[:3]
+            ],
+            "basic_signals": [
+                {
+                    "title": item.get("title", ""),
+                    "site_name": item.get("site_name", ""),
+                    "publish_time": item.get("publish_time", ""),
+                    "summary": _shorten(item.get("summary") or item.get("snippet", ""), 160),
+                }
+                for item in _search_items(search_evidence, "basic")[:3]
+            ],
+        },
+        "field_gaps": missing_or_unknown[:20],
+        "conflict_flags": conflict_flags,
+        "scoring_hints": {
+            "priority_sources": ["启信宝API 1.41主体确认", "企查查MCP主体确认回退", "启信宝白名单API固定结构化采集", "国家企业信用信息公示系统/公开搜索", "企查查MCP缺失字段补查"],
+            "analysis_hint": "优先基于本摘要评分；只有摘要证据不足或冲突时，再读取 search_evidence/qcc_mcp/triggered_mcp 原文。",
+            "qixin_collection_meta": qixin_api.get("_meta", {}) if isinstance(qixin_api, dict) else {},
+            "qixin_fatal_error": qixin_api.get("_fatal_error", {}) if isinstance(qixin_api, dict) else {},
+        },
     }
 
 
@@ -1124,7 +1300,7 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
     )
     qcc_data_json = _truncate_evidence_value(_build_qcc_data_json(qcc_mcp, qixin_api, triggered_mcp))
     collection_diagnostics = _build_collection_diagnostics(
-        qixin_api, qcc_mcp, triggered_mcp, qcc_data_json, collection_mode,
+        qixin_api, qcc_mcp, triggered_mcp, search_evidence, qcc_data_json, collection_mode,
     )
     logger.info(
         "Evidence collection completed: total_elapsed=%.1fs, qixin_hit=%d, qixin_miss=%d, "
