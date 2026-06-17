@@ -87,4 +87,32 @@ def generate_enterprise_report_single(user_input: str, collection_mode: str = "d
     timings["pdf_report"] = stage_timing(report_started)
     timings["total"] = stage_timing(started_at)
 
-    return f"{report_result}\n\n单次 LLM 耗时诊断：{compact_json(timings)}"
+    # 精简返回：只返回核心结论 + PDF链接 + 耗时诊断
+    # 避免返回超长全文导致 Agent 最后一轮 LLM 推理卡住
+    report_url = None
+    for line in str(report_result).splitlines():
+        if line.strip().startswith("📄"):
+            # 提取PDF链接
+            import re
+            m = re.search(r'\((https?://[^\)]+)\)', line)
+            if m:
+                report_url = m.group(1)
+            break
+
+    # 提取评级和总分
+    import re
+    rating_match = re.search(r'企业评级：([A-D][\+\-]?)', str(report_result))
+    score_match = re.search(r'加权总分[：:]([\d.]+)分', str(report_result))
+    rating = rating_match.group(1) if rating_match else "N/A"
+    total_score = score_match.group(1) if score_match else "N/A"
+
+    summary_lines = [
+        f"✅ 企业分析报告已生成",
+        f"- 企业评级：{rating}",
+        f"- 加权总分：{total_score}分",
+    ]
+    if report_url:
+        summary_lines.append(f"- 📄 [分析报告PDF]({report_url})")
+    summary_lines.append(f"\n耗时诊断：{compact_json(timings)}")
+
+    return "\n".join(summary_lines)
