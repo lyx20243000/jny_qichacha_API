@@ -206,6 +206,29 @@ _QIXIN_CIRCUIT_STATE = {
 _QIXIN_CACHE_DIR = Path(os.getenv("QIXIN_CACHE_DIR", ".cache/qixin"))
 
 
+def clear_persistent_cache() -> int:
+    """清除所有启信宝持久化缓存文件，返回清除的文件数量。
+
+    部署新版本时数据结构可能变更，旧缓存格式不兼容会导致解析错误，
+    因此每次应用启动时调用此方法清除残留缓存。
+    """
+    count = 0
+    if _QIXIN_CACHE_DIR.exists():
+        for f in _QIXIN_CACHE_DIR.glob("*.json"):
+            try:
+                f.unlink(missing_ok=True)
+                count += 1
+            except Exception:
+                pass
+    return count
+
+
+# 模块加载时自动清除持久化缓存（部署新版本后首次 import 即清除）
+_cleared = clear_persistent_cache()
+if _cleared:
+    logger.info("Qixin persistent cache cleared on startup: %d files removed", _cleared)
+
+
 def is_qixin_configured() -> bool:
     return bool(QIXIN_APPKEY and QIXIN_SECRET_KEY)
 
