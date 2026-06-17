@@ -17,11 +17,11 @@ git diff --check
 1. 用户通过 `/run`、`/stream_run`、`/async_run` 或 OpenAI 兼容接口提交企业查询请求；其中 `/stream_run` 在长耗时执行期间会每 10 秒输出一次 `progress` SSE 事件，用于告知上游任务仍在进行中。
 2. `src/main.py` 创建 Coze 运行上下文和 LangGraph run config。
 3. `src/agents/agent.py` 根据 `config/agent_llm_config.json` 构建 Agent 和工具列表。
-4. 完整企业分析默认调用 `generate_enterprise_report_two_stage`。
-5. `generate_enterprise_report_two_stage` 内部调用 `collect_enterprise_evidence`，完成主体确认、启信宝白名单 API 固定采集、公开搜索、按模式决定是否追加国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
-6. 第一轮 LLM 基于 `evidence_summary` / `collection_diagnostics` 生成紧凑 `scoring_core_json`，只负责四维评分、短 `basis`、红线字段、财务缺失和核心行动建议。
-7. 第二轮 LLM 基于 `scoring_core_json`、`qcc_data_json` 和 `collection_diagnostics_json` 生成 `report_enrichment_json`，只补全报告表达、绿电适配、KYB 风险、数据来源和行动建议，不允许重算分数。
-8. 代码合并两轮 JSON，保护第一轮的四维评分、`red_line_data`、主体信息和核心结论，再调用 `generate_enterprise_report` 输出 PDF。若第二轮失败，允许用第一轮结果和报告工具兜底生成简版报告；若第一轮失败，则停止生成报告。
+4. 完整企业分析默认调用 `generate_enterprise_report_parallel`。
+5. `generate_enterprise_report_parallel` 内部调用 `collect_enterprise_evidence`，完成主体确认、启信宝白名单 API 固定采集、公开搜索、按模式决定是否追加国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
+6. 采集完成后，代码按行业、企业经营、财务、信用/风险四个维度裁剪输入，降低单个 LLM 的上下文体积。
+7. 维度 LLM 按 `industry`、`operation`、`finance`、`credit` 顺序错峰启动，默认每 3 秒启动一个；维度正文不向用户流式输出。
+8. 等全部维度完成后，再调用 summary LLM 生成综合结论和行动建议；代码合并维度结果与汇总结果，保护四维评分、`red_line_data`、财务缺失字段和诊断字段，最后调用 `generate_enterprise_report` 输出 PDF。
 
 ## 数据源策略
 
@@ -68,6 +68,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 当前 Agent 暴露工具包括：
 
+- `generate_enterprise_report_parallel`
 - `generate_enterprise_report_two_stage`
 - `collect_enterprise_evidence`
 - `search_enterprise_candidates`
@@ -89,20 +90,25 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 当前仓库未发现独立的 Coze 工具参数声明文件。结合 `.coze` 仅负责 entrypoint/build/run/deploy，和 `src/agents/agent.py` 直接以 `create_agent(..., tools=[...])` 注册工具的方式，可以确认当前部署链路下工具参数暴露直接跟随 LangChain `@tool` 装饰器和函数签名。因此 `generate_enterprise_report` 新增 `collection_diagnostics_json` 后，不需要额外再维护一份 Coze schema 配置。
 
-## 两阶段 LLM 配置
+## LLM 报告链路配置
 
 配置文件：`config/agent_llm_config.json`
 
 - `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
-- `two_stage_generation.scoring_llm`：第一轮评分 LLM，只输出紧凑 `scoring_core_json`。
-- `two_stage_generation.report_llm`：第二轮报告 LLM，只输出 `report_enrichment_json`。
+- `parallel_generation.dimension_llm`：默认维度 LLM 共享配置。
+- `parallel_generation.summary_llm`：默认汇总 LLM 配置。
+- `parallel_generation.dimension_launch_interval_seconds`：维度 LLM 启动间隔，生产默认 3 秒。
+- `parallel_generation.max_input_chars` / `summary_max_input_chars`：控制维度和汇总阶段输入体积。
+- `two_stage_generation.scoring_llm` / `report_llm`：备用两阶段链路配置，默认入口不使用。
 
-两轮提示词定义在 `src/services/two_stage_llm_pipeline.py`：
+默认并发维度链路定义在 `src/services/parallel_dimension_llm_pipeline.py`。它复用 `src/services/two_stage_llm_pipeline.py` 中的 `invoke_stage_json`、`compact_json` 和 LLM 配置读取能力。
+
+备用两阶段链路提示词定义在 `src/services/two_stage_llm_pipeline.py`：
 
 - `SCORING_CORE_SYSTEM_PROMPT`
 - `REPORT_ENRICHMENT_SYSTEM_PROMPT`
 
-合并逻辑同样在 `src/services/two_stage_llm_pipeline.py`。`merge_scoring_payload` 会保护 `industry`、`operation`、`finance`、`credit`、`red_line_data`、`enterprise_profile`、`subject_verification` 等第一轮核心字段，避免第二轮报告表达改分。
+默认并发链路的工具运行公共逻辑位于 `src/tools/tool_runtime_helpers.py`，供 `parallel_report_tool.py` 和 `two_stage_report_tool.py` 共同调用，避免并发工具依赖两阶段模块里的私有函数。`src/agents/agent.py` 只保留简短的默认入口兜底前缀，完整默认入口说明以 `config/agent_llm_config.json` 为准，降低运行时 SP 与配置 SP 冲突风险。
 
 ## 固定采集返回
 

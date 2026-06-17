@@ -38,12 +38,11 @@ logger = logging.getLogger(__name__)
 
 LLM_CONFIG = "config/agent_llm_config.json"
 
-PARALLEL_DEFAULT_PROMPT_PREFIX = """# 默认执行入口覆盖
-当用户要求分析企业、生成企业评分或生成PDF报告时，优先调用 generate_enterprise_report_parallel。
-该工具会先完成固定数据采集，再按行业、企业经营、财务、信用/风险四个维度每 3 秒错峰启动一个 LLM 分析任务；等全部维度完成后，再调用汇总 LLM 生成综合结论和行动建议，并调用 generate_enterprise_report 输出 PDF。
-generate_enterprise_report_two_stage 仅作为备用/详细模式，不作为默认入口。
-除非 generate_enterprise_report_parallel 返回需要用户确认主体，否则不要手动拆开调用 collect_enterprise_evidence 和 generate_enterprise_report。
-"""
+PARALLEL_DEFAULT_PROMPT_PREFIX = (
+    "# 默认入口兜底\n"
+    "企业分析、评分和PDF报告默认优先调用 generate_enterprise_report_parallel；"
+    "generate_enterprise_report_two_stage 仅作为备用/详细模式。\n"
+)
 
 # 默认保留最近 20 轮对话 (40 条消息)
 MAX_MESSAGES = 40

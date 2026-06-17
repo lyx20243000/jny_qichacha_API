@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
@@ -14,7 +13,7 @@ from services.parallel_dimension_llm_pipeline import build_parallel_scoring_json
 from services.two_stage_llm_pipeline import compact_json, load_llm_config
 from tools.enterprise_evidence_tool import collect_enterprise_evidence
 from tools.report_tool import generate_enterprise_report
-from tools.two_stage_report_tool import _as_json_object, _invoke_langchain_tool, _stage_timing
+from tools.tool_runtime_helpers import as_json_object, invoke_langchain_tool, stage_timing
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +32,12 @@ def generate_enterprise_report_parallel(user_input: str, collection_mode: str = 
 
     try:
         evidence_started = time.monotonic()
-        evidence_text = _invoke_langchain_tool(
+        evidence_text = invoke_langchain_tool(
             collect_enterprise_evidence,
             {"user_input": user_input, "collection_mode": collection_mode},
         )
-        timings["evidence_collection"] = _stage_timing(evidence_started)
-        evidence_payload = _as_json_object(evidence_text, "collect_enterprise_evidence result")
+        timings["evidence_collection"] = stage_timing(evidence_started)
+        evidence_payload = as_json_object(evidence_text, "collect_enterprise_evidence result")
     except Exception as exc:
         logger.exception("parallel report evidence collection failed")
         return f"并发维度报告生成失败：证据采集失败：{exc}"
@@ -58,7 +57,7 @@ def generate_enterprise_report_parallel(user_input: str, collection_mode: str = 
             cfg=cfg,
             ctx=ctx,
         )
-        timings["parallel_dimension_analysis"] = _stage_timing(scoring_started)
+        timings["parallel_dimension_analysis"] = stage_timing(scoring_started)
         timings.update(parallel_timings)
     except Exception as exc:
         logger.exception("parallel dimension LLM pipeline failed")
@@ -70,7 +69,7 @@ def generate_enterprise_report_parallel(user_input: str, collection_mode: str = 
     )
 
     report_started = time.monotonic()
-    report_result = _invoke_langchain_tool(
+    report_result = invoke_langchain_tool(
         generate_enterprise_report,
         {
             "enterprise_name": enterprise_name,
@@ -79,7 +78,7 @@ def generate_enterprise_report_parallel(user_input: str, collection_mode: str = 
             "collection_diagnostics_json": collection_diagnostics_json,
         },
     )
-    timings["pdf_report"] = _stage_timing(report_started)
-    timings["total"] = _stage_timing(started_at)
+    timings["pdf_report"] = stage_timing(report_started)
+    timings["total"] = stage_timing(started_at)
 
     return f"{report_result}\n\n并发维度耗时诊断：{compact_json(timings)}"

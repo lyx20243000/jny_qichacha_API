@@ -6,10 +6,8 @@ payload merge, and the existing PDF report generation tool.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Any
 
 from langchain.tools import tool
 from coze_coding_utils.log.write_log import request_context
@@ -23,32 +21,9 @@ from services.two_stage_llm_pipeline import (
 )
 from tools.enterprise_evidence_tool import collect_enterprise_evidence
 from tools.report_tool import generate_enterprise_report
+from tools.tool_runtime_helpers import as_json_object, invoke_langchain_tool, stage_timing
 
 logger = logging.getLogger(__name__)
-
-
-def _invoke_langchain_tool(tool_obj: Any, kwargs: dict[str, Any]) -> Any:
-    if hasattr(tool_obj, "func") and callable(tool_obj.func):
-        return tool_obj.func(**kwargs)
-    if hasattr(tool_obj, "invoke") and callable(tool_obj.invoke):
-        return tool_obj.invoke(kwargs)
-    if callable(tool_obj):
-        return tool_obj(**kwargs)
-    raise TypeError(f"Unsupported tool object: {tool_obj!r}")
-
-
-def _as_json_object(value: Any, field_name: str) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value.strip():
-        parsed = json.loads(value)
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError(f"{field_name} must be a JSON object")
-
-
-def _stage_timing(started_at: float) -> float:
-    return round(time.monotonic() - started_at, 2)
 
 
 @tool
@@ -65,12 +40,12 @@ def generate_enterprise_report_two_stage(user_input: str, collection_mode: str =
 
     try:
         evidence_started = time.monotonic()
-        evidence_text = _invoke_langchain_tool(
+        evidence_text = invoke_langchain_tool(
             collect_enterprise_evidence,
             {"user_input": user_input, "collection_mode": collection_mode},
         )
-        timings["evidence_collection"] = _stage_timing(evidence_started)
-        evidence_payload = _as_json_object(evidence_text, "collect_enterprise_evidence result")
+        timings["evidence_collection"] = stage_timing(evidence_started)
+        evidence_payload = as_json_object(evidence_text, "collect_enterprise_evidence result")
     except Exception as exc:
         logger.exception("two-stage evidence collection failed")
         return f"两阶段报告生成失败：证据采集失败：{exc}"
@@ -90,7 +65,7 @@ def generate_enterprise_report_two_stage(user_input: str, collection_mode: str =
             cfg=cfg,
             ctx=ctx,
         )
-        timings["llm_scoring"] = _stage_timing(scoring_started)
+        timings["llm_scoring"] = stage_timing(scoring_started)
     except Exception as exc:
         logger.exception("two-stage scoring LLM failed")
         return f"两阶段报告生成失败：评分轮 LLM 未能生成合法 scoring_core_json：{exc}"
@@ -105,7 +80,7 @@ def generate_enterprise_report_two_stage(user_input: str, collection_mode: str =
             cfg=cfg,
             ctx=ctx,
         )
-        timings["llm_report_enrichment"] = _stage_timing(report_started)
+        timings["llm_report_enrichment"] = stage_timing(report_started)
     except Exception as exc:
         timings["llm_report_enrichment"] = -1
         logger.warning("report enrichment failed; falling back to scoring core only: %s", exc)
@@ -115,7 +90,7 @@ def generate_enterprise_report_two_stage(user_input: str, collection_mode: str =
     collection_diagnostics_json = compact_json(collection_diagnostics) if isinstance(collection_diagnostics, dict) else "{}"
 
     report_started = time.monotonic()
-    report_result = _invoke_langchain_tool(
+    report_result = invoke_langchain_tool(
         generate_enterprise_report,
         {
             "enterprise_name": enterprise_name,
@@ -124,8 +99,7 @@ def generate_enterprise_report_two_stage(user_input: str, collection_mode: str =
             "collection_diagnostics_json": collection_diagnostics_json,
         },
     )
-    timings["pdf_report"] = _stage_timing(report_started)
-    timings["total"] = _stage_timing(started_at)
+    timings["pdf_report"] = stage_timing(report_started)
+    timings["total"] = stage_timing(started_at)
 
     return f"{report_result}\n\n两阶段耗时诊断：{compact_json(timings)}"
-
