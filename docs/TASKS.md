@@ -35,6 +35,10 @@
 - [x] `generate_enterprise_report` 已支持可选传入 `collection_diagnostics_json`，用于复用 `recommended_next_step` / `review_reasons` 补全报告动作建议。
 - [x] 删除 CNBizAPI 兼容代码和相关文档口径，不再保留该备用链路。
 - [x] 已确认当前 Coze 部署链路下，工具参数暴露直接跟随 LangChain `@tool` + 函数签名；未发现需要额外维护的工具 schema 配置文件。
+- [x] 新增 `generate_enterprise_report_two_stage`，把完整报告生成拆成“固定采集 -> 第一轮紧凑评分 -> 第二轮报告补全 -> 合并 -> PDF”。
+- [x] 新增 `src/services/two_stage_llm_pipeline.py`，集中管理两轮 prompt、LLM 配置读取、JSON 抽取和合并保护逻辑。
+- [x] 外层 Agent 已优先注册两阶段报告工具，并关闭外层 `thinking`、降低外层输出 token 上限。
+- [x] 已补充 `tests/test_two_stage_llm_pipeline.py`，覆盖 JSON 抽取、合并保护和降级摘要逻辑。
 
 ## 启信宝白名单
 
@@ -53,6 +57,9 @@
 - [ ] 在 Coze 环境验证未传 `qcc_data_json` 时，报告阶段不会自动回查企查查 MCP。
 - [ ] 验证启信宝接口 `32.1` 的“地产行政处罚”在报告中不会被误写成通用行政处罚。
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
+- [ ] 在 Coze 环境验证 `generate_enterprise_report_two_stage` 是否优先被 Agent 调用。
+- [ ] 在 Coze 环境对比两阶段链路与旧链路的端到端耗时、第一轮耗时、第二轮耗时和 PDF 生成耗时。
+- [ ] 根据真实耗时继续压缩 `config/agent_llm_config.json` 中旧系统提示词，减少外层 Agent prompt 体积。
 
 ## 本地检查
 
@@ -72,3 +79,4 @@ git diff --check
 - `standard` 模式当前固定公开搜索 `industry/basic/finance/development`，`gsxt` 相关线索属于 `deep` 固定链路或 Agent 按需补查，不应在文档中写成默认必查。
 - 报告阶段当前是“复用已采集数据”模式；如果 `collect_enterprise_evidence` 没有传出 `qcc_data_json`，报告会继续生成，但不会再自动补查 MCP。
 - 启信宝接口字段结构需要在真实 Coze 环境用生产凭据验证。
+- 两阶段链路当前第一轮失败会停止报告生成；第二轮失败会降级为第一轮评分结果 + 报告工具兜底。上线后需要重点观察第一轮 JSON 合法率。

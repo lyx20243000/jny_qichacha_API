@@ -21,6 +21,7 @@ from tools.enterprise_search_tool import (
 )
 from tools.enterprise_fetch_tool import fetch_enterprise_page
 from tools.report_tool import generate_enterprise_report
+from tools.two_stage_report_tool import generate_enterprise_report_two_stage
 from tools.qcc_mcp_tool import (
     qcc_get_basic_info,
     qcc_get_finance_info,
@@ -49,6 +50,36 @@ class AgentState(MessagesState):
     messages: Annotated[list[AnyMessage], _windowed_messages]
 
 
+def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
+    kwargs = {
+        "model": cfg["config"].get("model"),
+        "api_key": api_key,
+        "base_url": base_url,
+        "temperature": cfg["config"].get("temperature", 0.4),
+        "streaming": True,
+        "timeout": cfg["config"].get("timeout", 600),
+        "extra_body": {
+            "thinking": {
+                "type": cfg["config"].get("thinking", "disabled")
+            }
+        },
+        "default_headers": default_headers(ctx) if ctx else {},
+    }
+    if cfg["config"].get("top_p") is not None:
+        kwargs["top_p"] = cfg["config"].get("top_p")
+
+    max_tokens = cfg["config"].get("max_completion_tokens")
+    if max_tokens:
+        try:
+            return ChatOpenAI(**kwargs, max_completion_tokens=max_tokens)
+        except TypeError:
+            try:
+                return ChatOpenAI(**kwargs, max_tokens=max_tokens)
+            except TypeError:
+                logger.warning("ChatOpenAI does not accept max token kwargs; continuing without token cap")
+    return ChatOpenAI(**kwargs)
+
+
 def build_agent(ctx=None):
     workspace_path = os.getenv("COZE_WORKSPACE_PATH", "/workspace/projects")
     config_path = os.path.join(workspace_path, LLM_CONFIG)
@@ -59,23 +90,11 @@ def build_agent(ctx=None):
     api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY")
     base_url = os.getenv("COZE_INTEGRATION_MODEL_BASE_URL")
 
-    llm = ChatOpenAI(
-        model=cfg["config"].get("model"),
-        api_key=api_key,
-        base_url=base_url,
-        temperature=cfg["config"].get("temperature", 0.4),
-        streaming=True,
-        timeout=cfg["config"].get("timeout", 600),
-        extra_body={
-            "thinking": {
-                "type": cfg["config"].get("thinking", "disabled")
-            }
-        },
-        default_headers=default_headers(ctx) if ctx else {},
-    )
+    llm = _build_chat_openai(cfg, api_key, base_url, ctx=ctx)
 
     # 免费渠道工具：固定采集、Coze 搜索、公开互联网搜索、页面抓取和报告生成
     tools = [
+        generate_enterprise_report_two_stage,
         collect_enterprise_evidence,
         search_enterprise_candidates,
         search_industry_info,
