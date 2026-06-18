@@ -76,7 +76,7 @@ def _ensure_single_stage_default_prompt(sp: str) -> str:
 
 
 def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
-    agent_streaming = _resolve_streaming_flag(cfg["config"].get("streaming"), default=True)
+    agent_streaming = _resolve_streaming_flag(cfg["config"].get("streaming"), default=False)
     kwargs = {
         "model": cfg["config"].get("model"),
         "api_key": api_key,
