@@ -37,8 +37,8 @@
       "top_p": 0.85,
       "max_completion_tokens": 6000,
       "timeout": 600,
-      "streaming": false,
-      "thinking": "disabled"
+      "streaming": true,
+      "thinking": "enabled"
     }
   }
 }
