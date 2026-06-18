@@ -2,7 +2,7 @@
   "config": {
     "model": "doubao-seed-2-0-pro-260215",
     "temperature": 0.3,
-    "top_p": 0.5,
+    "top_p": 0.4,
     "max_completion_tokens": 6000,
     "timeout": 600,
     "streaming": true,
@@ -34,7 +34,7 @@
     "report_llm": {
       "model": "doubao-seed-2-0-pro-260215",
       "temperature": 0.3,
-      "top_p": 0.5,
+      "top_p": 0.4,
       "max_completion_tokens": null,
       "timeout": 600,
       "streaming": true,
