@@ -60,6 +60,16 @@ SEVERE_RISK_KEYWORDS = (
 )
 
 
+def _resolve_optional_positive_int(value: Any) -> int | None:
+    if value in (None, "", False):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _looks_like_deep_request(user_input: str, collection_mode: str) -> bool:
     normalized_mode = str(collection_mode or "").strip().lower()
     if normalized_mode in {"deep", "full", "kyb"}:
@@ -170,9 +180,7 @@ def generate_enterprise_report_single(user_input: str, collection_mode: str = "s
 
     try:
         scoring_started = time.monotonic()
-        max_input_chars = int(
-            ((cfg.get("single_stage_generation", {}) or {}).get("max_input_chars", 18000)) or 18000
-        )
+        max_input_chars = _resolve_optional_positive_int((cfg.get("single_stage_generation", {}) or {}).get("max_input_chars"))
         llm_payload = build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
         timings["single_llm_input_chars"] = len(compact_json(llm_payload))
         timings["single_llm_input_sections"] = list(llm_payload.keys())

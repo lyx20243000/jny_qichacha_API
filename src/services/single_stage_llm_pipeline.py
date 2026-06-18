@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 from services.llm_json_pipeline import compact_json, invoke_stage_json
@@ -45,13 +44,13 @@ credit: dishonest_status, credit_rating
 """
 
 SUMMARY_SECTION_LIMITS = {
-    "subject_profile": 600,
-    "official_structured_summary": 600,
-    "official_search_summary": 500,
-    "operation_signal_summary": 600,
-    "finance_signal_summary": 600,
-    "risk_signal_summary": 600,
-    "search_signal_summary": 500,
+    "subject_profile": 1200,
+    "official_structured_summary": 1200,
+    "official_search_summary": 1000,
+    "operation_signal_summary": 1200,
+    "finance_signal_summary": 1200,
+    "risk_signal_summary": 1200,
+    "search_signal_summary": 1000,
 }
 
 QCC_DATA_PRIORITY_FIELDS = (
@@ -117,7 +116,7 @@ def _shorten_text(value: Any, limit: int) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-def _clip_simple_value(value: Any, max_chars: int = 500, max_items: int = 12) -> Any:
+def _clip_simple_value(value: Any, max_chars: int = 1000, max_items: int = 24) -> Any:
     if isinstance(value, dict):
         return {key: _clip_simple_value(item, max_chars, max_items) for key, item in value.items()}
     if isinstance(value, list):
@@ -134,6 +133,16 @@ def _clip_list_items(items: list[Any], *, max_items: int, max_chars_per_item: in
     return clipped
 
 
+def _resolve_optional_positive_int(value: Any) -> int | None:
+    if value in (None, "", False):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _trim_identity(identity: Any) -> dict[str, Any]:
     if not isinstance(identity, dict):
         return {}
@@ -145,7 +154,7 @@ def _trim_identity(identity: Any) -> dict[str, Any]:
         "match_reason",
         "confidence",
     )
-    return {key: _shorten_text(identity.get(key), 160) for key in keys if identity.get(key) not in (None, "", [], {})}
+    return {key: _shorten_text(identity.get(key), 320) for key in keys if identity.get(key) not in (None, "", [], {})}
 
 
 def _trim_collection_policy(policy: Any) -> dict[str, Any]:
@@ -153,12 +162,12 @@ def _trim_collection_policy(policy: Any) -> dict[str, Any]:
         return {}
     trimmed = {
         "mode": policy.get("mode", ""),
-        "available_modes": _shorten_text(policy.get("available_modes", ""), 120),
-        "qixin_search_key": _shorten_text(policy.get("qixin_search_key", ""), 120),
-        "public_search_key": _shorten_text(policy.get("public_search_key", ""), 120),
-        "qcc_mcp_search_key": _shorten_text(policy.get("qcc_mcp_search_key", ""), 120),
-        "subject_confirmation_priority": _shorten_text(policy.get("subject_confirmation_priority", ""), 220),
-        "triggered_collection": _clip_simple_value(policy.get("triggered_collection", {}), max_chars=180, max_items=6),
+        "available_modes": _shorten_text(policy.get("available_modes", ""), 240),
+        "qixin_search_key": _shorten_text(policy.get("qixin_search_key", ""), 240),
+        "public_search_key": _shorten_text(policy.get("public_search_key", ""), 240),
+        "qcc_mcp_search_key": _shorten_text(policy.get("qcc_mcp_search_key", ""), 240),
+        "subject_confirmation_priority": _shorten_text(policy.get("subject_confirmation_priority", ""), 440),
+        "triggered_collection": _clip_simple_value(policy.get("triggered_collection", {}), max_chars=360, max_items=12),
     }
     return {key: value for key, value in trimmed.items() if value not in (None, "", [], {})}
 
@@ -167,23 +176,23 @@ def _trim_collection_diagnostics(diagnostics: Any) -> dict[str, Any]:
     if not isinstance(diagnostics, dict):
         return {}
     trimmed = {
-        "qixin": _clip_simple_value(diagnostics.get("qixin", {}), max_chars=220, max_items=10),
-        "qcc_mcp": _clip_simple_value(diagnostics.get("qcc_mcp", {}), max_chars=220, max_items=10),
-        "search": _clip_simple_value(diagnostics.get("search", {}), max_chars=220, max_items=10),
-        "field_source_summary": _clip_simple_value(diagnostics.get("field_source_summary", {}), max_chars=120, max_items=10),
-        "module_completeness": _clip_simple_value(diagnostics.get("module_completeness", {}), max_chars=120, max_items=10),
+        "qixin": _clip_simple_value(diagnostics.get("qixin", {}), max_chars=440, max_items=20),
+        "qcc_mcp": _clip_simple_value(diagnostics.get("qcc_mcp", {}), max_chars=440, max_items=20),
+        "search": _clip_simple_value(diagnostics.get("search", {}), max_chars=440, max_items=20),
+        "field_source_summary": _clip_simple_value(diagnostics.get("field_source_summary", {}), max_chars=240, max_items=20),
+        "module_completeness": _clip_simple_value(diagnostics.get("module_completeness", {}), max_chars=240, max_items=20),
         "missing_or_unknown_fields_count": diagnostics.get("missing_or_unknown_fields_count", 0),
         "missing_or_unknown_fields": _clip_list_items(
             diagnostics.get("missing_or_unknown_fields", []) if isinstance(diagnostics.get("missing_or_unknown_fields"), list) else [],
-            max_items=12,
-            max_chars_per_item=120,
+            max_items=24,
+            max_chars_per_item=240,
         ),
         "source_conflict_count": diagnostics.get("source_conflict_count", 0),
         "needs_human_review": diagnostics.get("needs_human_review", False),
         "review_reasons": _clip_list_items(
             diagnostics.get("review_reasons", []) if isinstance(diagnostics.get("review_reasons"), list) else [],
-            max_items=6,
-            max_chars_per_item=120,
+            max_items=12,
+            max_chars_per_item=240,
         ),
         "recommended_next_step": diagnostics.get("recommended_next_step", ""),
         "collection_mode": diagnostics.get("collection_mode", ""),
@@ -202,9 +211,9 @@ def _trim_evidence_summary(summary: Any) -> dict[str, Any]:
     for key in ("field_gaps", "conflict_flags", "scoring_hints"):
         value = summary.get(key)
         if isinstance(value, list):
-            trimmed[key] = _clip_list_items(value, max_items=8, max_chars_per_item=140)
+            trimmed[key] = _clip_list_items(value, max_items=16, max_chars_per_item=280)
         elif value not in (None, "", [], {}):
-            trimmed[key] = _clip_simple_value(value, max_chars=180, max_items=8)
+            trimmed[key] = _clip_simple_value(value, max_chars=360, max_items=16)
     return trimmed
 
 
@@ -214,9 +223,9 @@ def _trim_qixin_api(qixin_api: Any, *, max_chars_per_api: int, max_items_per_lis
     trimmed = {}
     for key, value in qixin_api.items():
         if key == "_meta":
-            trimmed[key] = _clip_simple_value(value, max_chars=240, max_items=10)
+            trimmed[key] = _clip_simple_value(value, max_chars=480, max_items=20)
         elif key == "_fatal_error":
-            trimmed[key] = _clip_simple_value(value, max_chars=220, max_items=8)
+            trimmed[key] = _clip_simple_value(value, max_chars=440, max_items=16)
         else:
             trimmed[key] = _clip_simple_value(value, max_chars=max_chars_per_api, max_items=max_items_per_list)
     return trimmed
@@ -229,16 +238,16 @@ def _trim_qcc_group(group: Any, *, max_chars_per_item: int, max_items_per_list: 
 def _trim_qcc_mcp(qcc_mcp: Any, *, tight: bool = False) -> dict[str, Any]:
     if not isinstance(qcc_mcp, dict):
         return {}
-    list_limit = 8 if tight else 12
-    char_limit = 240 if tight else 360
+    list_limit = 16 if tight else 24
+    char_limit = 480 if tight else 720
     return {
-        "basic": _trim_qcc_group(qcc_mcp.get("basic", {}), max_chars_per_item=420 if not tight else 320, max_items_per_list=list_limit),
-        "finance": _trim_qcc_group(qcc_mcp.get("finance", {}), max_chars_per_item=420 if not tight else 320, max_items_per_list=list_limit),
-        "risk": _trim_qcc_group(qcc_mcp.get("risk", {}), max_chars_per_item=360 if not tight else 280, max_items_per_list=list_limit),
-        "extended_risk": _trim_qcc_group(qcc_mcp.get("extended_risk", {}), max_chars_per_item=320 if not tight else 240, max_items_per_list=list_limit),
-        "ip": _trim_qcc_group(qcc_mcp.get("ip", {}), max_chars_per_item=220 if not tight else 160, max_items_per_list=10 if not tight else 8),
-        "operation": _trim_qcc_group(qcc_mcp.get("operation", {}), max_chars_per_item=260 if not tight else 180, max_items_per_list=10 if not tight else 8),
-        "news": _trim_qcc_group(qcc_mcp.get("news", {}), max_chars_per_item=180 if not tight else 120, max_items_per_list=8 if not tight else 5),
+        "basic": _trim_qcc_group(qcc_mcp.get("basic", {}), max_chars_per_item=840 if not tight else 640, max_items_per_list=list_limit),
+        "finance": _trim_qcc_group(qcc_mcp.get("finance", {}), max_chars_per_item=840 if not tight else 640, max_items_per_list=list_limit),
+        "risk": _trim_qcc_group(qcc_mcp.get("risk", {}), max_chars_per_item=720 if not tight else 560, max_items_per_list=list_limit),
+        "extended_risk": _trim_qcc_group(qcc_mcp.get("extended_risk", {}), max_chars_per_item=640 if not tight else 480, max_items_per_list=list_limit),
+        "ip": _trim_qcc_group(qcc_mcp.get("ip", {}), max_chars_per_item=440 if not tight else 320, max_items_per_list=20 if not tight else 16),
+        "operation": _trim_qcc_group(qcc_mcp.get("operation", {}), max_chars_per_item=520 if not tight else 360, max_items_per_list=20 if not tight else 16),
+        "news": _trim_qcc_group(qcc_mcp.get("news", {}), max_chars_per_item=360 if not tight else 240, max_items_per_list=16 if not tight else 10),
         "_collection_note": _shorten_text(qcc_mcp.get("_collection_note", ""), char_limit),
     }
 
@@ -247,15 +256,15 @@ def _trim_triggered_mcp(triggered_mcp: Any, *, tight: bool = False) -> dict[str,
     if not isinstance(triggered_mcp, dict):
         return {}
     trimmed = {}
-    max_sections = 3 if not tight else 2
+    max_sections = 6 if not tight else 4
     kept = 0
     for key, value in triggered_mcp.items():
         if key == "_meta":
-            trimmed[key] = _clip_simple_value(value, max_chars=220, max_items=10)
+            trimmed[key] = _clip_simple_value(value, max_chars=440, max_items=20)
             continue
         if kept >= max_sections:
             continue
-        trimmed[key] = _clip_simple_value(value, max_chars=320 if not tight else 220, max_items=10 if not tight else 6)
+        trimmed[key] = _clip_simple_value(value, max_chars=640 if not tight else 440, max_items=20 if not tight else 12)
         kept += 1
     return trimmed
 
@@ -264,8 +273,8 @@ def _trim_search_group(group: Any, *, tight: bool = False) -> dict[str, Any]:
     if not isinstance(group, dict):
         return {}
     items = group.get("items", [])
-    max_items = 6 if not tight else 4
-    summary_limit = 240 if not tight else 180
+    max_items = 12 if not tight else 8
+    summary_limit = 480 if not tight else 360
     trimmed_items = []
     if isinstance(items, list):
         for item in items[:max_items]:
@@ -273,20 +282,20 @@ def _trim_search_group(group: Any, *, tight: bool = False) -> dict[str, Any]:
                 continue
             trimmed_items.append(
                 {
-                    "title": _shorten_text(item.get("title", ""), 120),
-                    "site_name": _shorten_text(item.get("site_name", ""), 60),
-                    "publish_time": _shorten_text(item.get("publish_time", ""), 40),
-                    "snippet": _shorten_text(item.get("snippet", "") or item.get("summary", ""), 180 if not tight else 120),
+                    "title": _shorten_text(item.get("title", ""), 240),
+                    "site_name": _shorten_text(item.get("site_name", ""), 120),
+                    "publish_time": _shorten_text(item.get("publish_time", ""), 80),
+                    "snippet": _shorten_text(item.get("snippet", "") or item.get("summary", ""), 360 if not tight else 240),
                     "authority": item.get("authority", ""),
                 }
             )
     trimmed = {
-        "query": _shorten_text(group.get("query", ""), 180),
-        "profile_name": _shorten_text(group.get("profile_name", ""), 60),
-        "search_type": _shorten_text(group.get("search_type", ""), 60),
+        "query": _shorten_text(group.get("query", ""), 360),
+        "profile_name": _shorten_text(group.get("profile_name", ""), 120),
+        "search_type": _shorten_text(group.get("search_type", ""), 120),
         "summary": _shorten_text(group.get("summary", ""), summary_limit),
         "items": trimmed_items,
-        "stats": _clip_simple_value(group.get("stats", {}), max_chars=80, max_items=12),
+        "stats": _clip_simple_value(group.get("stats", {}), max_chars=160, max_items=24),
     }
     return {key: value for key, value in trimmed.items() if value not in (None, "", [], {})}
 
@@ -311,13 +320,13 @@ def _trim_qcc_data_json(qcc_data_json: Any, *, tight: bool = False) -> dict[str,
             continue
         value = qcc_data_json.get(key)
         if key == "field_sources":
-            trimmed[key] = _clip_simple_value(value, max_chars=80, max_items=30)
+            trimmed[key] = _clip_simple_value(value, max_chars=160, max_items=60)
         elif key == "source_conflicts":
-            trimmed[key] = _clip_simple_value(value, max_chars=140 if not tight else 100, max_items=8 if not tight else 5)
+            trimmed[key] = _clip_simple_value(value, max_chars=280 if not tight else 200, max_items=16 if not tight else 10)
         elif key == "history_risk":
-            trimmed[key] = _clip_simple_value(value, max_chars=260 if not tight else 180, max_items=10 if not tight else 6)
+            trimmed[key] = _clip_simple_value(value, max_chars=520 if not tight else 360, max_items=20 if not tight else 12)
         else:
-            trimmed[key] = _clip_simple_value(value, max_chars=420 if not tight else 280, max_items=12 if not tight else 8)
+            trimmed[key] = _clip_simple_value(value, max_chars=840 if not tight else 560, max_items=24 if not tight else 16)
     return trimmed
 
 
@@ -329,8 +338,8 @@ def _compose_payload(evidence_payload: dict[str, Any], *, tight: bool = False) -
         "evidence_summary": _trim_evidence_summary(evidence_payload.get("evidence_summary", {})),
         "qixin_api": _trim_qixin_api(
             evidence_payload.get("qixin_api", {}),
-            max_chars_per_api=1200 if not tight else 900,
-            max_items_per_list=20 if not tight else 14,
+            max_chars_per_api=2400 if not tight else 1800,
+            max_items_per_list=40 if not tight else 28,
         ),
         "qcc_mcp": _trim_qcc_mcp(evidence_payload.get("qcc_mcp", {}), tight=tight),
         "triggered_mcp": _trim_triggered_mcp(evidence_payload.get("triggered_mcp", {}), tight=tight),
@@ -340,35 +349,12 @@ def _compose_payload(evidence_payload: dict[str, Any], *, tight: bool = False) -
     return payload
 
 
-def _bounded_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
-    if len(compact_json(payload)) <= max_chars:
-        return payload
-
-    trimmed = copy.deepcopy(payload)
-    trimmed["search_evidence"] = _trim_search_evidence(trimmed.get("search_evidence", {}), tight=True)
-    trimmed["triggered_mcp"] = _trim_triggered_mcp(trimmed.get("triggered_mcp", {}), tight=True)
-    if len(compact_json(trimmed)) <= max_chars:
-        return trimmed
-
-    trimmed["qcc_mcp"] = _trim_qcc_mcp(trimmed.get("qcc_mcp", {}), tight=True)
-    trimmed["qcc_data_json"] = _trim_qcc_data_json(trimmed.get("qcc_data_json", {}), tight=True)
-    trimmed["qixin_api"] = _trim_qixin_api(trimmed.get("qixin_api", {}), max_chars_per_api=900, max_items_per_list=14)
-    if len(compact_json(trimmed)) <= max_chars:
-        return trimmed
-
-    trimmed["evidence_summary"] = _clip_simple_value(trimmed.get("evidence_summary", {}), max_chars=280, max_items=8)
-    trimmed["collection_diagnostics"] = _clip_simple_value(trimmed.get("collection_diagnostics", {}), max_chars=160, max_items=8)
-    trimmed["search_evidence"] = _trim_search_evidence(trimmed.get("search_evidence", {}), tight=True)
-    trimmed["triggered_mcp"] = _trim_triggered_mcp(trimmed.get("triggered_mcp", {}), tight=True)
-    return trimmed
-
-
 def build_single_stage_payload(
     evidence_payload: dict[str, Any],
-    max_input_chars: int = 18000,
+    max_input_chars: int | None = None,
 ) -> dict[str, Any]:
-    payload = _compose_payload(evidence_payload, tight=False)
-    return _bounded_payload(payload, max_input_chars)
+    _ = max_input_chars
+    return _compose_payload(evidence_payload, tight=False)
 
 
 def build_single_stage_scoring_json(
@@ -379,10 +365,7 @@ def build_single_stage_scoring_json(
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     single_stage = cfg.get("single_stage_generation", {})
-    max_input_chars = 18000
-    if isinstance(single_stage, dict):
-        max_input_chars = int(single_stage.get("max_input_chars", max_input_chars) or max_input_chars)
-
+    max_input_chars = _resolve_optional_positive_int(single_stage.get("max_input_chars")) if isinstance(single_stage, dict) else None
     payload = payload or build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
     return invoke_stage_json(
         system_prompt=SINGLE_STAGE_SYSTEM_PROMPT,

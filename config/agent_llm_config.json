@@ -30,12 +30,12 @@
     "generate_enterprise_report"
   ],
   "single_stage_generation": {
-    "max_input_chars": 18000,
+    "max_input_chars": null,
     "report_llm": {
       "model": "doubao-seed-2-0-pro-260215",
       "temperature": 0.3,
       "top_p": 0.5,
-      "max_completion_tokens": 6000,
+      "max_completion_tokens": null,
       "timeout": 600,
       "streaming": true,
       "thinking": "enabled"

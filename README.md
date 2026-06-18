@@ -33,7 +33,7 @@
 当前流式兼容策略是：
 
 - 外层 Agent / 对话入口默认保留流式能力，兼容 `/stream_run` 和 `/run`。
-- 内部单轮评分 LLM 默认使用非流式 `invoke`，降低长文本评分阶段与 SSE 解析耦合导致的卡住风险。
+- 内部单轮评分 LLM 的 `streaming / thinking / timeout` 等参数由 `single_stage_generation.report_llm` 配置控制；当前代码不再依赖总 `max_input_chars` / 总 `max_completion_tokens` 硬限制。
 - `/stream_run` 过程中如果遇到异常流式 chunk，会过滤 `reasoning_content` 一类非正文内容；若流式执行仍异常，会自动降级为一次非流式聚合执行，再通过 SSE 回传最终结果。
 - 正常流式结束的 `StopAsyncIteration` 不再被误判为异常；只有真实流式异常才会触发 fallback。
 - fallback 非流式执行即使再次失败，也会通过 SSE 返回最终 `final` 事件，避免前端一直停在“分析中”。
@@ -49,18 +49,18 @@
 
 当前上限摘要：
 
-- `qixin_api`：普通接口常规最多 `1200` 字符，收紧 `900`；列表常规最多 `20` 项，收紧 `14` 项
-- `qcc_mcp.basic/finance`：常规每项 `420` 字符，收紧 `320`；列表常规 `12` 项，收紧 `8` 项
-- `qcc_mcp.risk`：常规每项 `360`，收紧 `280`；列表常规 `12` 项，收紧 `8` 项
-- `qcc_mcp.extended_risk`：常规每项 `320`，收紧 `240`；列表常规 `12` 项，收紧 `8` 项
-- `qcc_mcp.operation`：常规每项 `260`，收紧 `180`
-- `qcc_mcp.ip`：常规每项 `220`，收紧 `160`
-- `qcc_mcp.news`：常规每项 `180`，收紧 `120`
-- `triggered_mcp`：常规最多 `3` 个 section，收紧 `2` 个；每项常规 `320`，收紧 `220`
-- `search_evidence`：每组常规 `6` 条，收紧 `4` 条；`snippet` 常规 `180` / 收紧 `120`
-- `qcc_data_json`：普通字段常规 `420` / 收紧 `280`，`history_risk` 常规 `260` / 收紧 `180`
+- `qixin_api`：普通接口常规最多 `2400` 字符，收紧 `1800`；列表常规最多 `40` 项，收紧 `28` 项
+- `qcc_mcp.basic/finance`：常规每项 `840` 字符，收紧 `640`；列表常规 `24` 项，收紧 `16` 项
+- `qcc_mcp.risk`：常规每项 `720`，收紧 `560`；列表常规 `24` 项，收紧 `16` 项
+- `qcc_mcp.extended_risk`：常规每项 `640`，收紧 `480`；列表常规 `24` 项，收紧 `16` 项
+- `qcc_mcp.operation`：常规每项 `520`，收紧 `360`；列表常规 `20` 项，收紧 `16` 项
+- `qcc_mcp.ip`：常规每项 `440`，收紧 `320`；列表常规 `20` 项，收紧 `16` 项
+- `qcc_mcp.news`：常规每项 `360`，收紧 `240`；列表常规 `16` 项，收紧 `10` 项
+- `triggered_mcp`：常规最多 `6` 个 section，收紧 `4` 个；每项常规 `640`，收紧 `440`
+- `search_evidence`：每组常规 `12` 条，收紧 `8` 条；`title` `240`，`snippet` 常规 `360` / 收紧 `240`
+- `qcc_data_json`：普通字段常规 `840` / 收紧 `560`，`history_risk` 常规 `520` / 收紧 `360`
 
-超限时的收紧顺序是：先收 `search_evidence`，再收 `triggered_mcp`，再收 `qcc_mcp`，再收 `qcc_data_json`，再收 `qixin_api`，最后才轻收 `evidence_summary` 和 `collection_diagnostics`。
+当前默认不再对单轮评分 LLM 施加总 `max_input_chars` / 总 `max_completion_tokens` 硬限制，只保留各维度各自的裁剪上限。
 
 `collect_enterprise_evidence` 当前除原有 `qixin_api`、`qcc_mcp`、`triggered_mcp`、`qcc_data_json` 外，还会返回：
 

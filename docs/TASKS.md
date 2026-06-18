@@ -48,11 +48,13 @@
 - [x] 已把单轮 LLM 的维度级限制和收紧顺序同步写入 README / TECHNICAL 文档，便于后续继续调参。
 - [x] 已收紧 standard -> deep 自动升级条件：股权出质、动产抵押不再单独触发 deep；“0 条 / 0 个 / 未查询到”类文本不再误判为风险信号。
 - [x] 已复用单轮 LLM 的裁剪后 payload，避免日志统计和正式评分各重复构造一次大 payload。
-- [x] 已将外层 Agent 与内部评分链路拆分为独立流式策略：外层默认流式，内部评分默认非流式。
+- [x] 已将外层 Agent 与内部评分链路拆分为独立流式策略；内部评分链路当前 `streaming / thinking / timeout` 由 `single_stage_generation.report_llm` 配置控制。
 - [x] 已为 `/stream_run` 增加流式 chunk 归一化和异常自动降级到非流式聚合返回的兜底逻辑。
 - [x] 已修正 `/stream_run` 对 `StopAsyncIteration` 的误判，正常流结束不再误触发 fallback。
 - [x] 已补强 fallback 收口：降级后的非流式执行即使失败，也会返回最终 `final` SSE 事件。
 - [x] 已为内部评分调用增加运行时诊断日志，输出实际生效的 `model / streaming / thinking / timeout / max_completion_tokens / payload_chars`。
+- [x] 已移除单轮评分 LLM 的总 `max_input_chars` / 总 `max_completion_tokens` 硬限制，改为仅保留各维度裁剪上限。
+- [x] 已将单轮评分入参各维度的字符数、条目数、section 数上限整体提高到原来的 2 倍。
 
 ## 启信宝白名单
 
@@ -73,7 +75,7 @@
 - [ ] 为 `qixin_openapi_client.py` 增加单元测试。
 - [ ] 在 Coze 环境验证 `generate_enterprise_report_single` 是否优先被 Agent 调用。
 - [ ] 在 Coze 环境验证完整报告入口默认 standard、按条件升级 deep 后仅发生一次 LLM scoring 调用，再进入 PDF 生成。
-- [ ] 根据真实耗时调整 `single_stage_generation.max_input_chars`、`max_completion_tokens` 和 `timeout`。
+- [ ] 根据真实耗时继续调整各维度裁剪上限、`thinking / streaming` 组合和 `timeout`。
 - [x] 已将 `config/agent_llm_config.json` 外层 SP 从约 2 万字符压缩到约 1.7k 字符。
 
 ## 本地检查

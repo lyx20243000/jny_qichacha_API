@@ -25,7 +25,7 @@ git diff --check
 ### 流式/非流式兼容策略
 
 - 外层 Agent 模型配置默认 `streaming=true`，继续兼容 Coze 前端 `/stream_run` 的 SSE 链路，同时也兼容 `/run` 的一次性返回。
-- 内部评分链路 `single_stage_generation.report_llm` 默认 `streaming=false`，即评分 JSON 生成阶段走稳态非流式调用，避免长文本评分与模型 SSE chunk 解析强耦合。
+- 内部评分链路 `single_stage_generation.report_llm` 的 `streaming / thinking / timeout` 等参数当前完全由配置控制；当前仓库默认值为 `streaming=true`、`thinking=enabled`。
 - `src/main.py` 的 `stream_sse` 对流式 chunk 做了归一化处理：会过滤 `reasoning_content` 这类非最终正文 chunk，尽量只向上游透传有效 `content`。
 - `StopAsyncIteration` 作为正常流结束信号，已与真实异常分开处理，不再误触发 fallback。
 - 如果流式执行过程中仍出现异常，服务会自动降级到一次 `run()` 非流式聚合执行，再通过 SSE 发送最终 `final` 结果；即使 fallback 自身失败，也会返回带错误信息的最终 `final` 事件，避免前端长时间停在“分析中”。
@@ -100,9 +100,9 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 配置文件：`config/agent_llm_config.json`
 
-- `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
-- `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒，且默认 `streaming=false`。
-- `single_stage_generation.max_input_chars`：控制完整证据输入体积；实际入模前还会按维度裁剪，优先保留启信宝/QCC 核心结构化事实，强裁剪搜索和新闻等非核心文本。
+- `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，模型参数以 `config` 为准。
+- `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒；不再单独设置 `max_completion_tokens` 硬上限。
+- `single_stage_generation.max_input_chars`：当前为 `null`，不再对单轮评分 LLM 施加总输入硬限制；实际入模前只保留各维度各自的裁剪上限。
 
 当前 standard -> deep 自动升级逻辑还额外做了两层收紧：
 
@@ -127,46 +127,37 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 当前代码中的维度限制如下：
 
 - `identity`
-  保留 `status`、`enterprise_name`、`unified_social_credit_code`、`match_source`、`match_reason`、`confidence`；每字段最多 `160` 字符。
+  保留 `status`、`enterprise_name`、`unified_social_credit_code`、`match_source`、`match_reason`、`confidence`；每字段最多 `320` 字符。
 - `collection_policy`
-  保留 `mode`、`available_modes`、`qixin_search_key`、`public_search_key`、`qcc_mcp_search_key`、`subject_confirmation_priority`、`triggered_collection`；普通字段最多 `120-220` 字符，`triggered_collection` 最多 `6` 项。
+  保留 `mode`、`available_modes`、`qixin_search_key`、`public_search_key`、`qcc_mcp_search_key`、`subject_confirmation_priority`、`triggered_collection`；普通字段最多 `240-440` 字符，`triggered_collection` 最多 `12` 项。
 - `collection_diagnostics`
-  子对象默认最多 `220` 字符；`field_source_summary` / `module_completeness` 每项 `120` 字符；`missing_or_unknown_fields` 最多 `12` 条，每条 `120` 字符；`review_reasons` 最多 `6` 条，每条 `120` 字符。
+  子对象默认最多 `440` 字符；`field_source_summary` / `module_completeness` 每项 `240` 字符；`missing_or_unknown_fields` 最多 `24` 条，每条 `240` 字符；`review_reasons` 最多 `12` 条，每条 `240` 字符。
 - `evidence_summary`
-  `subject_profile` / `official_structured_summary` / `operation_signal_summary` / `finance_signal_summary` / `risk_signal_summary` 各 `600` 字符；`official_search_summary` / `search_signal_summary` 各 `500` 字符；`field_gaps` / `conflict_flags` / `scoring_hints` 最多 `8` 条，每条 `140` 字符。
+  `subject_profile` / `official_structured_summary` / `operation_signal_summary` / `finance_signal_summary` / `risk_signal_summary` 各 `1200` 字符；`official_search_summary` / `search_signal_summary` 各 `1000` 字符；`field_gaps` / `conflict_flags` / `scoring_hints` 最多 `16` 条，每条 `280` 字符。
 - `qixin_api`
-  `_meta` 最多 `240` 字符，`_fatal_error` 最多 `220` 字符；普通接口结果常规最多 `1200` 字符、收紧时 `900` 字符；列表常规最多 `20` 项、收紧时 `14` 项。
+  `_meta` 最多 `480` 字符，`_fatal_error` 最多 `440` 字符；普通接口结果常规最多 `2400` 字符、收紧时 `1800` 字符；列表常规最多 `40` 项、收紧时 `28` 项。
 - `qcc_mcp.basic`
-  常规每项 `420` 字符，收紧每项 `320` 字符；列表常规最多 `12` 项，收紧最多 `8` 项。
+  常规每项 `840` 字符，收紧每项 `640` 字符；列表常规最多 `24` 项，收紧最多 `16` 项。
 - `qcc_mcp.finance`
-  常规每项 `420` 字符，收紧每项 `320` 字符；列表常规最多 `12` 项，收紧最多 `8` 项。
+  常规每项 `840` 字符，收紧每项 `640` 字符；列表常规最多 `24` 项，收紧最多 `16` 项。
 - `qcc_mcp.risk`
-  常规每项 `360` 字符，收紧每项 `280` 字符；列表常规最多 `12` 项，收紧最多 `8` 项。
+  常规每项 `720` 字符，收紧每项 `560` 字符；列表常规最多 `24` 项，收紧最多 `16` 项。
 - `qcc_mcp.extended_risk`
-  常规每项 `320` 字符，收紧每项 `240` 字符；列表常规最多 `12` 项，收紧最多 `8` 项。
+  常规每项 `640` 字符，收紧每项 `480` 字符；列表常规最多 `24` 项，收紧最多 `16` 项。
 - `qcc_mcp.ip`
-  常规每项 `220` 字符，收紧每项 `160` 字符；常规最多 `10` 项，收紧最多 `8` 项。
+  常规每项 `440` 字符，收紧每项 `320` 字符；常规最多 `20` 项，收紧最多 `16` 项。
 - `qcc_mcp.operation`
-  常规每项 `260` 字符，收紧每项 `180` 字符；常规最多 `10` 项，收紧最多 `8` 项。
+  常规每项 `520` 字符，收紧每项 `360` 字符；常规最多 `20` 项，收紧最多 `16` 项。
 - `qcc_mcp.news`
-  常规每项 `180` 字符，收紧每项 `120` 字符；常规最多 `8` 项，收紧最多 `5` 项。
+  常规每项 `360` 字符，收紧每项 `240` 字符；常规最多 `16` 项，收紧最多 `10` 项。
 - `triggered_mcp`
-  常规最多保留 `3` 个 section，收紧最多 `2` 个；常规每项 `320` 字符、收紧每项 `220` 字符；列表常规最多 `10` 项，收紧最多 `6` 项。
+  常规最多保留 `6` 个 section，收紧最多 `4` 个；常规每项 `640` 字符、收紧每项 `440` 字符；列表常规最多 `20` 项，收紧最多 `12` 项。
 - `search_evidence`
-  每组保留 `query`、`profile_name`、`search_type`、`summary`、`items`、`stats`；常规每组最多 `6` 条结果、收紧最多 `4` 条；`title` 最多 `120` 字符，`site_name` `60`，`publish_time` `40`，`snippet` 常规 `180` / 收紧 `120`，`summary` 常规 `240` / 收紧 `180`，`stats` `80`。
+  每组保留 `query`、`profile_name`、`search_type`、`summary`、`items`、`stats`；常规每组最多 `12` 条结果、收紧最多 `8` 条；`title` 最多 `240` 字符，`site_name` `120`，`publish_time` `80`，`snippet` 常规 `360` / 收紧 `240`，`summary` 常规 `480` / 收紧 `360`，`stats` `160`。
 - `qcc_data_json`
-  优先保留 `registration`、`company_profile`、`shareholder`、`actual_controller`、`listing_info`、`key_personnel`、`financial`、`investment`、`dishonest`、`admin_penalty`、`business_exception`、`serious_violation`、`high_consumption`、`risk_scan`、`case_filing`、`credit_eval`、`executed_person`、`judicial_documents`、`court_announcement`、`final_case`、`environmental_penalty`、`tax_abnormal`、`tax_arrears`、`tax_violation`、`equity_pledge`、`equity_freeze`、`chattel_mortgage`、`land_mortgage`、`history_risk`、`patent`、`trademark`、`software_copyright`、`bidding`、`qualifications`、`honor`、`recruitment`、`administrative_license`、`taxpayer_qualification`、`product_check`、`state_owned_land_transfer`、`news_sentiment`、`field_sources`、`source_conflicts`；普通字段常规 `420` / 收紧 `280`，`history_risk` 常规 `260` / 收紧 `180`，`field_sources` `80`，`source_conflicts` 常规 `140` / 收紧 `100`；常规最多 `12` 项，收紧最多 `8` 项。
+  优先保留 `registration`、`company_profile`、`shareholder`、`actual_controller`、`listing_info`、`key_personnel`、`financial`、`investment`、`dishonest`、`admin_penalty`、`business_exception`、`serious_violation`、`high_consumption`、`risk_scan`、`case_filing`、`credit_eval`、`executed_person`、`judicial_documents`、`court_announcement`、`final_case`、`environmental_penalty`、`tax_abnormal`、`tax_arrears`、`tax_violation`、`equity_pledge`、`equity_freeze`、`chattel_mortgage`、`land_mortgage`、`history_risk`、`patent`、`trademark`、`software_copyright`、`bidding`、`qualifications`、`honor`、`recruitment`、`administrative_license`、`taxpayer_qualification`、`product_check`、`state_owned_land_transfer`、`news_sentiment`、`field_sources`、`source_conflicts`；普通字段常规 `840` / 收紧 `560`，`history_risk` 常规 `520` / 收紧 `360`，`field_sources` `160`，`source_conflicts` 常规 `280` / 收紧 `200`；常规最多 `24` 项，收紧最多 `16` 项。
 
-总量收紧顺序如下：
-
-1. 先收 `search_evidence`
-2. 再收 `triggered_mcp`
-3. 再收 `qcc_mcp`
-4. 再收 `qcc_data_json`
-5. 再收 `qixin_api`
-6. 最后才轻收 `evidence_summary` 和 `collection_diagnostics`
-
-也就是说，启信宝 / QCC 的核心结构化事实是最后才动的，优先牺牲搜索和新闻等非核心文本。
+当前代码不再对单轮评分 LLM 做总 `max_input_chars` 硬截断；是否启用总量限制完全由配置决定，当前默认只保留各维度各自的裁剪上限。
 
 ## 固定采集返回
 
