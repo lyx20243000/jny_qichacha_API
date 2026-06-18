@@ -22,6 +22,16 @@ from coze_coding_utils.log.write_log import setup_logging, request_context
 from coze_coding_utils.log.config import LOG_LEVEL
 from coze_coding_utils.error.classifier import ErrorClassifier, classify_error
 from coze_coding_utils.helper.stream_runner import AgentStreamRunner, WorkflowStreamRunner,agent_stream_handler,workflow_stream_handler, RunOpt
+from coze_coding_utils.helper.agent_helper import (
+    to_stream_input,
+    agent_iter_server_messages,
+    to_client_message,
+)
+from coze_coding_utils.messages.server import (
+    create_message_end_dict,
+    create_message_error_dict,
+    MESSAGE_END_CODE_CANCELED,
+)
 from storage.database.db import get_session, get_engine
 from storage.memory.memory_saver import get_memory_saver
 from storage.database.shared.model import Base
@@ -57,6 +67,143 @@ from coze_coding_utils.log.loop_trace import init_run_config, init_agent_config
 TIMEOUT_SECONDS = 900  # 15分钟
 STREAM_PROGRESS_INTERVAL_SECONDS = 10
 
+
+def _patch_reasoning_content(items):
+    """
+    Intercept graph.stream() output and merge reasoning_content into content
+    for AIMessageChunk objects, so that _item_to_server_messages can process
+    thinking chunks correctly.
+
+    Without this patch, AIMessageChunk with only reasoning_content (no content)
+    is silently dropped by _item_to_server_messages, causing the frontend to
+    hang when thinking=enabled.
+    """
+    for chunk, meta in items:
+        chunk_type = getattr(chunk, '__class__', type(chunk)).__name__
+        if chunk_type == "AIMessageChunk":
+            reasoning = getattr(chunk, 'reasoning_content', None) or getattr(chunk, 'additional_kwargs', {}).get('reasoning_content')
+            content = getattr(chunk, 'content', None)
+
+            # If there's reasoning_content but no visible content, merge it
+            if reasoning and not content:
+                # Set content to reasoning text so _item_to_server_messages emits it
+                try:
+                    chunk.content = f"[思考中] {reasoning}" if isinstance(reasoning, str) else str(reasoning)
+                except Exception:
+                    pass
+            # If both exist, just clear reasoning_content to avoid duplication
+            elif reasoning and content:
+                try:
+                    if hasattr(chunk, 'reasoning_content'):
+                        chunk.reasoning_content = None
+                    if hasattr(chunk, 'additional_kwargs') and 'reasoning_content' in chunk.additional_kwargs:
+                        chunk.additional_kwargs['reasoning_content'] = None
+                except Exception:
+                    pass
+
+        yield chunk, meta
+
+
+class ThinkingCompatibleAgentStreamRunner(AgentStreamRunner):
+    """
+    Extended AgentStreamRunner that handles thinking/reasoning_content
+    in streaming output, preventing frontend hangs when thinking=enabled.
+    """
+
+    async def astream(self, payload: Dict[str, Any], graph: CompiledStateGraph, run_config: RunnableConfig, ctx=Context, run_opt: Optional[RunOpt] = None) -> AsyncIterable[Any]:
+        client_msg, session_id = to_client_message(payload)
+        run_config["recursion_limit"] = 100
+        run_config["configurable"] = {"thread_id": session_id}
+        stream_input = to_stream_input(client_msg)
+
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+        context = contextvars.copy_context()
+        start_time = time.time()
+        cancelled = threading.Event()
+
+        def producer():
+            last_seq = 0
+            try:
+                if cancelled.is_set():
+                    logger.info(f"Producer cancelled before start for run_id: {ctx.run_id}")
+                    return
+
+                raw_items = graph.stream(stream_input, stream_mode="messages", config=run_config, context=ctx)
+                # Patch reasoning_content before passing to agent_iter_server_messages
+                patched_items = _patch_reasoning_content(raw_items)
+
+                server_msgs_iter = agent_iter_server_messages(
+                    patched_items,
+                    session_id=client_msg.session_id,
+                    query_msg_id=client_msg.local_msg_id,
+                    local_msg_id=client_msg.local_msg_id,
+                    run_id=ctx.run_id,
+                    log_id=ctx.logid,
+                )
+                for sm in server_msgs_iter:
+                    if cancelled.is_set():
+                        logger.info(f"Producer cancelled during iteration for run_id: {ctx.run_id}")
+                        cancel_msg = create_message_end_dict(
+                            code=MESSAGE_END_CODE_CANCELED,
+                            message="Stream cancelled by upstream",
+                            session_id=client_msg.session_id,
+                            query_msg_id=client_msg.local_msg_id,
+                            log_id=ctx.logid,
+                            time_cost_ms=int((time.time() - start_time) * 1000),
+                            reply_id=getattr(sm, 'reply_id', ''),
+                            sequence_id=last_seq + 1,
+                        )
+                        loop.call_soon_threadsafe(q.put_nowait, cancel_msg)
+                        return
+
+                    if time.time() - start_time > TIMEOUT_SECONDS:
+                        logger.error(f"Agent execution timeout after {TIMEOUT_SECONDS}s for run_id: {ctx.run_id}")
+                        timeout_msg = create_message_end_dict(
+                            code="TIMEOUT",
+                            message=f"Execution timeout: exceeded {TIMEOUT_SECONDS} seconds",
+                            session_id=client_msg.session_id,
+                            query_msg_id=client_msg.local_msg_id,
+                            log_id=ctx.logid,
+                            time_cost_ms=int((time.time() - start_time) * 1000),
+                            reply_id=getattr(sm, 'reply_id', ''),
+                            sequence_id=last_seq + 1,
+                        )
+                        loop.call_soon_threadsafe(q.put_nowait, timeout_msg)
+                        return
+                    loop.call_soon_threadsafe(q.put_nowait, sm.dict())
+                    last_seq = sm.sequence_id
+            except Exception as ex:
+                if cancelled.is_set():
+                    logger.info(f"Producer exception after cancel for run_id: {ctx.run_id}, ignoring: {ex}")
+                    return
+                err = classify_error(ex, {"node_name": "astream"})
+                end_msg = create_message_error_dict(
+                    code=str(err.code),
+                    message=err.message,
+                    session_id=client_msg.session_id,
+                    query_msg_id=client_msg.local_msg_id,
+                    log_id=ctx.logid,
+                    reply_id="",
+                    sequence_id=last_seq + 1,
+                )
+                loop.call_soon_threadsafe(q.put_nowait, end_msg)
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, None)
+
+        threading.Thread(target=lambda: context.run(producer), daemon=True).start()
+
+        try:
+            while True:
+                item = await q.get()
+                if item is None:
+                    break
+                yield item
+        except asyncio.CancelledError:
+            logger.info(f"Stream cancelled for run_id: {ctx.run_id}, signaling producer to stop")
+            cancelled.set()
+            raise
+
 class GraphService:
     def __init__(self):
         # 用于跟踪正在运行的任务（使用asyncio.Task）
@@ -64,7 +211,7 @@ class GraphService:
         # 错误分类器
         self.error_classifier = ErrorClassifier()
         # stream runner
-        self._agent_stream_runner = AgentStreamRunner()
+        self._agent_stream_runner = ThinkingCompatibleAgentStreamRunner()
         self._workflow_stream_runner = WorkflowStreamRunner()
         self._graph = None
         self._graph_lock = threading.Lock()
