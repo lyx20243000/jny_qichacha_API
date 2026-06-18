@@ -18,7 +18,7 @@ git diff --check
 2. `src/main.py` 创建 Coze 运行上下文和 LangGraph run config。
 3. `src/agents/agent.py` 根据 `config/agent_llm_config.json` 构建 Agent 和工具列表。
 4. 完整企业分析默认调用 `generate_enterprise_report_single`。
-5. `generate_enterprise_report_single` 内部强制以 `collection_mode=deep` 调用 `collect_enterprise_evidence`，完成主体确认、启信宝白名单 API 固定采集、公开搜索、国家企业信用信息公示系统线索、企查查 MCP 补缺和证据整理。
+5. `generate_enterprise_report_single` 内部默认先以 `collection_mode=standard` 调用 `collect_enterprise_evidence`；只有命中显式深度请求、核心风险、关键字段缺失较多或诊断建议 `trigger_deep` 时，才自动重跑 `deep`。
 6. 采集完成后，代码把完整证据压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
 7. `generate_enterprise_report` 基于 `scoring_json`、`qcc_data_json` 和 `collection_diagnostics_json` 计算加权分、兜底补全报告字段并输出 PDF。
 
@@ -94,7 +94,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 - `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
 - `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒。
-- `single_stage_generation.max_input_chars`：控制完整证据输入体积。
+- `single_stage_generation.max_input_chars`：控制完整证据输入体积；实际入模前还会按维度裁剪，优先保留启信宝/QCC 核心结构化事实，强裁剪搜索和新闻等非核心文本。
 
 `config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。
 
@@ -164,7 +164,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 ## 采集模式
 
 - `quick`：主体确认、启信宝关键接口、少量公开搜索和必要风险核查。
-- `standard`：`collect_enterprise_evidence` 单独调用时的默认模式，适合调试或轻量评估；完整报告入口不会使用它。
+- `standard`：默认模式，适合普通生产评估；完整报告入口先跑这一层核心采集。
 - `deep`：深度尽调，采集更多 KYB、历史风险、税务环保、资产负担、司法详情、知识产权和舆情。
 
 性能相关环境变量：
@@ -219,9 +219,10 @@ QCC_MCP_API_KEY06=...
 The default complete report tool is `generate_enterprise_report_single`.
 Its execution flow is:
 
-1. Force `collect_enterprise_evidence` to run with `collection_mode=deep` for subject verification and full fixed evidence collection.
-2. Compress the full evidence payload into one bounded LLM input.
-3. Call one LLM once to produce the complete `scoring_json`.
-4. Call `generate_enterprise_report` to calculate scores, apply report fallbacks, and generate the PDF.
+1. Call `collect_enterprise_evidence` with `collection_mode=standard` for subject verification and core fixed evidence collection.
+2. Re-run `collect_enterprise_evidence` with `collection_mode=deep` only when explicit deep triggers are detected.
+3. Compress the fixed evidence payload into one bounded LLM input with dimension-aware trimming.
+4. Call one LLM once to produce the complete `scoring_json`.
+5. Call `generate_enterprise_report` to calculate scores, apply report fallbacks, and generate the PDF.
 
 Parallel dimension and two-stage code is kept for traceability, but those tools are no longer registered in the default Agent tool list.
