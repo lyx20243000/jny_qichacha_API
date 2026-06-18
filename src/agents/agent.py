@@ -47,6 +47,19 @@ SINGLE_STAGE_DEFAULT_PROMPT_PREFIX = (
 MAX_MESSAGES = 40
 
 
+def _resolve_streaming_flag(value, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on", "stream", "streaming", "enabled"}:
+        return True
+    if normalized in {"false", "0", "no", "off", "non-stream", "non_stream", "disabled"}:
+        return False
+    return default
+
+
 def _windowed_messages(old, new):
     """滑动窗口: 只保留最近 MAX_MESSAGES 条消息"""
     return add_messages(old, new)[-MAX_MESSAGES:]  # type: ignore
@@ -63,12 +76,13 @@ def _ensure_single_stage_default_prompt(sp: str) -> str:
 
 
 def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
+    agent_streaming = _resolve_streaming_flag(cfg["config"].get("streaming"), default=True)
     kwargs = {
         "model": cfg["config"].get("model"),
         "api_key": api_key,
         "base_url": base_url,
         "temperature": cfg["config"].get("temperature", 0.4),
-        "streaming": True,
+        "streaming": agent_streaming,
         "timeout": cfg["config"].get("timeout", 600),
         "extra_body": {
             "thinking": {

@@ -22,6 +22,13 @@ git diff --check
 6. 采集完成后，代码把完整证据压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
 7. `generate_enterprise_report` 基于 `scoring_json`、`qcc_data_json` 和 `collection_diagnostics_json` 计算加权分、兜底补全报告字段并输出 PDF。
 
+### 流式/非流式兼容策略
+
+- 外层 Agent 模型配置默认 `streaming=true`，继续兼容 Coze 前端 `/stream_run` 的 SSE 链路，同时也兼容 `/run` 的一次性返回。
+- 内部评分链路 `single_stage_generation.report_llm` 默认 `streaming=false`，即评分 JSON 生成阶段走稳态非流式调用，避免长文本评分与模型 SSE chunk 解析强耦合。
+- `src/main.py` 的 `stream_sse` 对流式 chunk 做了归一化处理：会过滤 `reasoning_content` 这类非最终正文 chunk，尽量只向上游透传有效 `content`。
+- 如果流式执行过程中仍出现异常，服务会自动降级到一次 `run()` 非流式聚合执行，再通过 SSE 发送最终 `final` 结果，避免前端长时间停在“分析中”。
+
 ## 数据源策略
 
 当前策略是：
@@ -93,7 +100,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 配置文件：`config/agent_llm_config.json`
 
 - `config`：外层 Agent 配置。当前外层 Agent 只负责工具选择和对话协调，已关闭 `thinking` 并降低 `max_completion_tokens`。
-- `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒。
+- `single_stage_generation.report_llm`：默认单次 LLM 配置，当前 `timeout` 为 600 秒，且默认 `streaming=false`。
 - `single_stage_generation.max_input_chars`：控制完整证据输入体积；实际入模前还会按维度裁剪，优先保留启信宝/QCC 核心结构化事实，强裁剪搜索和新闻等非核心文本。
 
 当前 standard -> deep 自动升级逻辑还额外做了两层收紧：

@@ -92,6 +92,49 @@ class GraphService:
         id_line = f"id: {event_id}\n" if event_id else ""
         return f"{id_line}event: message\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
+    @staticmethod
+    def _normalize_stream_chunk(chunk: Any) -> Any:
+        if not isinstance(chunk, dict):
+            return chunk
+
+        if chunk.get("reasoning_content") and not chunk.get("content"):
+            return None
+
+        choices = chunk.get("choices")
+        if isinstance(choices, list):
+            normalized_choices = []
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    normalized_choices.append(choice)
+                    continue
+                normalized_choice = dict(choice)
+                delta = normalized_choice.get("delta")
+                if isinstance(delta, dict):
+                    delta = dict(delta)
+                    if "reasoning_content" in delta and not delta.get("content"):
+                        delta.pop("reasoning_content", None)
+                        if not delta:
+                            continue
+                    else:
+                        delta.pop("reasoning_content", None)
+                    normalized_choice["delta"] = delta
+                message = normalized_choice.get("message")
+                if isinstance(message, dict):
+                    message = dict(message)
+                    message.pop("reasoning_content", None)
+                    normalized_choice["message"] = message
+                normalized_choices.append(normalized_choice)
+            if not normalized_choices:
+                return None
+            normalized_chunk = dict(chunk)
+            normalized_chunk["choices"] = normalized_choices
+            normalized_chunk.pop("reasoning_content", None)
+            return normalized_chunk
+
+        normalized_chunk = dict(chunk)
+        normalized_chunk.pop("reasoning_content", None)
+        return normalized_chunk
+
     def _get_stream_runner(self):
         if graph_helper.is_agent_proj():
             return self._agent_stream_runner
@@ -160,6 +203,7 @@ class GraphService:
         started_at = time.monotonic()
         stream_iter = self.astream(payload, graph, run_config=run_config, ctx=ctx, run_opt=run_opt).__aiter__()
         next_chunk_task: Optional[asyncio.Task] = None
+        stream_error: Optional[Exception] = None
 
         try:
             while True:
@@ -182,16 +226,47 @@ class GraphService:
                     continue
                 try:
                     chunk = next_chunk_task.result()
+                except Exception as exc:
+                    stream_error = exc
+                    logger.warning(
+                        "streaming execution failed, downgrade to non-stream run: run_id=%s error=%s",
+                        run_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    break
                 except StopAsyncIteration:
                     break
                 finally:
                     next_chunk_task = None
+
+                chunk = self._normalize_stream_chunk(chunk)
+                if chunk is None:
+                    continue
 
                 if is_workflow and isinstance(chunk, tuple):
                     event_id, data = chunk
                     yield self._sse_event(data, event_id)
                 else:
                     yield self._sse_event(chunk)
+
+            if stream_error is not None:
+                yield self._sse_event(
+                    {
+                        "type": "progress",
+                        "run_id": run_id,
+                        "message": "流式输出异常，已自动切换为非流式聚合返回",
+                    }
+                )
+                fallback_result = await self.run(payload, ctx)
+                yield self._sse_event(
+                    {
+                        "type": "final",
+                        "run_id": run_id,
+                        "mode": "fallback_non_stream",
+                        "data": fallback_result,
+                    }
+                )
         finally:
             if next_chunk_task is not None and not next_chunk_task.done():
                 next_chunk_task.cancel()
