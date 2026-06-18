@@ -321,7 +321,7 @@ def _trim_qcc_data_json(qcc_data_json: Any, *, tight: bool = False) -> dict[str,
     return trimmed
 
 
-def _compose_payload(evidence_payload: dict[str, Any], *, tight: bool = False, extra_tight: bool = False) -> dict[str, Any]:
+def _compose_payload(evidence_payload: dict[str, Any], *, tight: bool = False) -> dict[str, Any]:
     payload = {
         "identity": _trim_identity(evidence_payload.get("identity", {})),
         "collection_policy": _trim_collection_policy(evidence_payload.get("collection_policy", {})),
@@ -329,17 +329,14 @@ def _compose_payload(evidence_payload: dict[str, Any], *, tight: bool = False, e
         "evidence_summary": _trim_evidence_summary(evidence_payload.get("evidence_summary", {})),
         "qixin_api": _trim_qixin_api(
             evidence_payload.get("qixin_api", {}),
-            max_chars_per_api=1200 if not tight else 900 if not extra_tight else 720,
-            max_items_per_list=20 if not tight else 14 if not extra_tight else 10,
+            max_chars_per_api=1200 if not tight else 900,
+            max_items_per_list=20 if not tight else 14,
         ),
-        "qcc_mcp": _trim_qcc_mcp(evidence_payload.get("qcc_mcp", {}), tight=tight or extra_tight),
-        "triggered_mcp": _trim_triggered_mcp(evidence_payload.get("triggered_mcp", {}), tight=tight or extra_tight),
-        "qcc_data_json": _trim_qcc_data_json(evidence_payload.get("qcc_data_json", {}), tight=tight or extra_tight),
-        "search_evidence": _trim_search_evidence(evidence_payload.get("search_evidence", {}), tight=tight or extra_tight),
+        "qcc_mcp": _trim_qcc_mcp(evidence_payload.get("qcc_mcp", {}), tight=tight),
+        "triggered_mcp": _trim_triggered_mcp(evidence_payload.get("triggered_mcp", {}), tight=tight),
+        "qcc_data_json": _trim_qcc_data_json(evidence_payload.get("qcc_data_json", {}), tight=tight),
+        "search_evidence": _trim_search_evidence(evidence_payload.get("search_evidence", {}), tight=tight),
     }
-    if extra_tight:
-        payload["evidence_summary"] = _clip_simple_value(payload.get("evidence_summary", {}), max_chars=320, max_items=8)
-        payload["collection_diagnostics"] = _clip_simple_value(payload.get("collection_diagnostics", {}), max_chars=180, max_items=8)
     return payload
 
 
@@ -379,13 +376,14 @@ def build_single_stage_scoring_json(
     evidence_payload: dict[str, Any],
     cfg: dict[str, Any],
     ctx: Any = None,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     single_stage = cfg.get("single_stage_generation", {})
     max_input_chars = 18000
     if isinstance(single_stage, dict):
         max_input_chars = int(single_stage.get("max_input_chars", max_input_chars) or max_input_chars)
 
-    payload = build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
+    payload = payload or build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
     return invoke_stage_json(
         system_prompt=SINGLE_STAGE_SYSTEM_PROMPT,
         payload=payload,

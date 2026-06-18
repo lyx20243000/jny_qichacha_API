@@ -18,7 +18,7 @@
 
 - 根据用户输入的企业名称或统一社会信用代码，默认通过 `generate_enterprise_report_single` 端到端生成报告；该工具内部先通过 `collect_enterprise_evidence` 完成主体确认和完整证据采集。
 - 主体确认优先使用启信宝 API `1.41` 工商照面；未命中时回退到企查查 MCP 工商登记，再使用 Coze/公开搜索候选确认。
-- 主体确认后按分层策略采集启信宝白名单接口数据：完整报告入口默认先跑 `standard` 核心采集，只在用户明确要求深度尽调、命中核心风险、关键字段缺失较多或诊断建议 `trigger_deep` 时自动升级到 `deep`。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
+- 主体确认后按分层策略采集启信宝白名单接口数据：完整报告入口默认先跑 `standard` 核心采集，只在用户明确要求深度尽调、命中核心风险、关键字段缺失较多或诊断建议 `trigger_deep` 时自动升级到 `deep`。这里的“核心风险”优先指失信、被执行、严重违法、行政处罚、经营异常、限制高消费、税收违法、股权冻结等信号，不把股权出质、动产抵押这类常规融资字段单独视为 deep 触发条件。启信宝成功结果会写入本地 `.cache/qixin` 持久化缓存，减少重复分析时的耗时和额度消耗。
 - 按行业、企业经营、财务、信用四个维度评分。
 - 输出企业分析结论、数据可信度、财务缺失说明、重点风险和行动建议，并通过 Coze 文档服务生成 PDF 报告链接。
 
@@ -26,11 +26,32 @@
 
 当前默认报告链路已撤销多轮/多维度 LLM，改回 `generate_enterprise_report_single`：
 
-1. 完整采集：内部默认先用 `collection_mode=standard` 调用 `collect_enterprise_evidence`；只有命中显式深度请求、核心风险、字段缺口或 `trigger_deep` 诊断时，才自动重跑 `deep`。
+1. 完整采集：内部默认先用 `collection_mode=standard` 调用 `collect_enterprise_evidence`；只有命中显式深度请求、核心风险、字段缺口或 `trigger_deep` 诊断时，才自动重跑 `deep`。风险文本判断会排除“未查询到 / 无相关 / 暂无 / 0 条 / 0 个”这类非风险描述。
 2. 单次 LLM：将完整采集结果按维度裁剪后压缩为一次输入，只调用一次 LLM 生成完整 `scoring_json`。
 3. 报告生成：调用 `generate_enterprise_report` 计算加权分、兜底补全报告字段并生成 PDF。
 
 并发维度和两阶段相关默认入口已从当前代码中删除；如需追溯，可查看历史提交。
+
+当前维度裁剪口径是：
+
+- 核心结构化事实宽保留：`qixin_api`、`qcc_mcp.basic/risk/finance/extended_risk`、`qcc_data_json`
+- 重要补充中度裁剪：`qcc_mcp.operation`、`qcc_mcp.ip`、`triggered_mcp`
+- 非核心文本强裁剪：`search_evidence`、`qcc_mcp.news`
+
+当前上限摘要：
+
+- `qixin_api`：普通接口常规最多 `1200` 字符，收紧 `900`；列表常规最多 `20` 项，收紧 `14` 项
+- `qcc_mcp.basic/finance`：常规每项 `420` 字符，收紧 `320`；列表常规 `12` 项，收紧 `8` 项
+- `qcc_mcp.risk`：常规每项 `360`，收紧 `280`；列表常规 `12` 项，收紧 `8` 项
+- `qcc_mcp.extended_risk`：常规每项 `320`，收紧 `240`；列表常规 `12` 项，收紧 `8` 项
+- `qcc_mcp.operation`：常规每项 `260`，收紧 `180`
+- `qcc_mcp.ip`：常规每项 `220`，收紧 `160`
+- `qcc_mcp.news`：常规每项 `180`，收紧 `120`
+- `triggered_mcp`：常规最多 `3` 个 section，收紧 `2` 个；每项常规 `320`，收紧 `220`
+- `search_evidence`：每组常规 `6` 条，收紧 `4` 条；`snippet` 常规 `180` / 收紧 `120`
+- `qcc_data_json`：普通字段常规 `420` / 收紧 `280`，`history_risk` 常规 `260` / 收紧 `180`
+
+超限时的收紧顺序是：先收 `search_evidence`，再收 `triggered_mcp`，再收 `qcc_mcp`，再收 `qcc_data_json`，再收 `qixin_api`，最后才轻收 `evidence_summary` 和 `collection_diagnostics`。
 
 `collect_enterprise_evidence` 当前除原有 `qixin_api`、`qcc_mcp`、`triggered_mcp`、`qcc_data_json` 外，还会返回：
 

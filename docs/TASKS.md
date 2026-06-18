@@ -45,6 +45,9 @@
 - [x] `config/agent_llm_config.json` 已移除 `parallel_generation` / `two_stage_generation` 默认配置，改为 `single_stage_generation`。
 - [x] 单次 LLM 超时已设置为 600 秒。
 - [x] 单次 LLM 入模前已改为按维度裁剪，优先保留启信宝/QCC 核心结构化事实，强裁剪搜索和新闻等非核心文本。
+- [x] 已把单轮 LLM 的维度级限制和收紧顺序同步写入 README / TECHNICAL 文档，便于后续继续调参。
+- [x] 已收紧 standard -> deep 自动升级条件：股权出质、动产抵押不再单独触发 deep；“0 条 / 0 个 / 未查询到”类文本不再误判为风险信号。
+- [x] 已复用单轮 LLM 的裁剪后 payload，避免日志统计和正式评分各重复构造一次大 payload。
 
 ## 启信宝白名单
 

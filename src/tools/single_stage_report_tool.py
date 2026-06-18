@@ -35,6 +35,30 @@ DEEP_TRIGGER_KEYWORDS = (
     "风险排查",
 )
 
+SAFE_RISK_TEXT_KEYWORDS = (
+    "未查询到",
+    "无相关",
+    "暂无",
+    "没有相关",
+    "无记录",
+    "未发现",
+)
+
+POSITIVE_RISK_COUNT_PATTERN = re.compile(r"(?<!\d)([1-9]\d*)\s*(条|个|项|次|起|件|笔|宗)")
+ZERO_RISK_COUNT_PATTERN = re.compile(r"(?:^|[^\d])0\s*(条|个|项|次|起|件|笔|宗)")
+SEVERE_RISK_KEYWORDS = (
+    "被执行",
+    "失信",
+    "处罚",
+    "异常",
+    "限制高消费",
+    "严重违法",
+    "立案",
+    "冻结",
+    "欠税",
+    "税收违法",
+)
+
 
 def _looks_like_deep_request(user_input: str, collection_mode: str) -> bool:
     normalized_mode = str(collection_mode or "").strip().lower()
@@ -48,16 +72,16 @@ def _looks_like_risk_signal(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    safe_keywords = ("未查询到", "无相关", "暂无", "没有相关", "无记录", "未发现")
-    if any(keyword in text for keyword in safe_keywords):
+    if any(keyword in text for keyword in SAFE_RISK_TEXT_KEYWORDS):
         return False
-    return any(keyword in text for keyword in ("有", "存在", "共", "条", "被执行", "处罚", "异常", "限制高消费", "严重违法"))
+    if ZERO_RISK_COUNT_PATTERN.search(text):
+        return False
+    if any(keyword in text for keyword in SEVERE_RISK_KEYWORDS):
+        return True
+    return POSITIVE_RISK_COUNT_PATTERN.search(text) is not None
 
 
 def _should_escalate_to_deep(user_input: str, evidence_payload: dict[str, Any]) -> tuple[bool, str]:
-    if _looks_like_deep_request(user_input, ""):
-        return True, "user_requested_deep"
-
     diagnostics = evidence_payload.get("collection_diagnostics", {}) or {}
     next_step = str(diagnostics.get("recommended_next_step") or "").strip().lower()
     if next_step == "trigger_deep":
@@ -78,9 +102,7 @@ def _should_escalate_to_deep(user_input: str, evidence_payload: dict[str, Any]) 
         "high_consumption",
         "executed_person",
         "tax_violation",
-        "equity_pledge",
         "equity_freeze",
-        "chattel_mortgage",
     )
     if any(_looks_like_risk_signal(qcc_data.get(field)) for field in risk_fields):
         return True, "core_risk_signal_detected"
@@ -151,13 +173,14 @@ def generate_enterprise_report_single(user_input: str, collection_mode: str = "s
         max_input_chars = int(
             ((cfg.get("single_stage_generation", {}) or {}).get("max_input_chars", 18000)) or 18000
         )
-        payload_preview = build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
-        timings["single_llm_input_chars"] = len(compact_json(payload_preview))
-        timings["single_llm_input_sections"] = list(payload_preview.keys())
+        llm_payload = build_single_stage_payload(evidence_payload, max_input_chars=max_input_chars)
+        timings["single_llm_input_chars"] = len(compact_json(llm_payload))
+        timings["single_llm_input_sections"] = list(llm_payload.keys())
         final_scoring = build_single_stage_scoring_json(
             evidence_payload=evidence_payload,
             cfg=cfg,
             ctx=ctx,
+            payload=llm_payload,
         )
         timings["single_llm_scoring"] = stage_timing(scoring_started)
     except Exception as exc:
