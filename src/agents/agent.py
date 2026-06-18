@@ -86,7 +86,7 @@ def _build_chat_openai(cfg: dict, api_key: str, base_url: str, ctx=None):
         "timeout": cfg["config"].get("timeout", 600),
         "extra_body": {
             "thinking": {
-                "type": cfg["config"].get("thinking", "disabled")
+                "type": cfg["config"].get("thinking", "enabled")
             }
         },
         "default_headers": default_headers(ctx) if ctx else {},

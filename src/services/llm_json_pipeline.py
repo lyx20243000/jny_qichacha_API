@@ -87,7 +87,7 @@ def _build_chat_openai(stage_config: dict[str, Any], ctx: Any = None):
         "temperature": stage_config.get("temperature", 0.2),
         "streaming": _resolve_streaming_flag(stage_config.get("streaming"), default=False),
         "timeout": stage_config.get("timeout", 600),
-        "extra_body": {"thinking": {"type": stage_config.get("thinking", "disabled")}},
+        "extra_body": {"thinking": {"type": stage_config.get("thinking", "enabled")}},
         "default_headers": default_headers(ctx) if ctx else {},
     }
     if stage_config.get("top_p") is not None:
@@ -116,7 +116,7 @@ def invoke_stage_json(
         "invoke_stage_json config: model=%s streaming=%s thinking=%s timeout=%s max_completion_tokens=%s payload_chars=%s",
         stage_config.get("model"),
         _resolve_streaming_flag(stage_config.get("streaming"), default=False),
-        stage_config.get("thinking", "disabled"),
+        stage_config.get("thinking", "enabled"),
         stage_config.get("timeout", 600),
         stage_config.get("max_completion_tokens"),
         len(compact_json(payload)),
