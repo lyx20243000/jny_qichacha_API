@@ -27,7 +27,8 @@ git diff --check
 - 外层 Agent 模型配置默认 `streaming=true`，继续兼容 Coze 前端 `/stream_run` 的 SSE 链路，同时也兼容 `/run` 的一次性返回。
 - 内部评分链路 `single_stage_generation.report_llm` 默认 `streaming=false`，即评分 JSON 生成阶段走稳态非流式调用，避免长文本评分与模型 SSE chunk 解析强耦合。
 - `src/main.py` 的 `stream_sse` 对流式 chunk 做了归一化处理：会过滤 `reasoning_content` 这类非最终正文 chunk，尽量只向上游透传有效 `content`。
-- 如果流式执行过程中仍出现异常，服务会自动降级到一次 `run()` 非流式聚合执行，再通过 SSE 发送最终 `final` 结果，避免前端长时间停在“分析中”。
+- `StopAsyncIteration` 作为正常流结束信号，已与真实异常分开处理，不再误触发 fallback。
+- 如果流式执行过程中仍出现异常，服务会自动降级到一次 `run()` 非流式聚合执行，再通过 SSE 发送最终 `final` 结果；即使 fallback 自身失败，也会返回带错误信息的最终 `final` 事件，避免前端长时间停在“分析中”。
 
 ## 数据源策略
 
@@ -107,6 +108,7 @@ QIXIN_API_CHECK_TIMEOUT_SECONDS=10
 
 - 风险文本识别会先排除 `未查询到`、`无相关`、`暂无`、`没有相关`、`无记录`、`未发现`、`0 条`、`0 个` 等安全描述，避免把“有 0 条记录”误判成风险。
 - LLM 入参日志阶段与正式评分阶段共用同一份裁剪后 payload，避免重复构造大体积 evidence payload。
+- 内部评分调用前会打印 `model / streaming / thinking / timeout / max_completion_tokens / payload_chars` 运行时诊断日志，用于确认 Coze 部署环境实际生效的模型参数。
 
 `config/agent_llm_config.json` 中的外层 `sp` 已压缩为短路由提示，只负责默认入口、主体确认、数据源边界、采集模式和输出规则。完整评分细则不放在外层 Agent SP，避免每次工具选择消耗大量上下文窗口。
 

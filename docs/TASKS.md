@@ -50,6 +50,9 @@
 - [x] 已复用单轮 LLM 的裁剪后 payload，避免日志统计和正式评分各重复构造一次大 payload。
 - [x] 已将外层 Agent 与内部评分链路拆分为独立流式策略：外层默认流式，内部评分默认非流式。
 - [x] 已为 `/stream_run` 增加流式 chunk 归一化和异常自动降级到非流式聚合返回的兜底逻辑。
+- [x] 已修正 `/stream_run` 对 `StopAsyncIteration` 的误判，正常流结束不再误触发 fallback。
+- [x] 已补强 fallback 收口：降级后的非流式执行即使失败，也会返回最终 `final` SSE 事件。
+- [x] 已为内部评分调用增加运行时诊断日志，输出实际生效的 `model / streaming / thinking / timeout / max_completion_tokens / payload_chars`。
 
 ## 启信宝白名单
 

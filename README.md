@@ -35,6 +35,9 @@
 - 外层 Agent / 对话入口默认保留流式能力，兼容 `/stream_run` 和 `/run`。
 - 内部单轮评分 LLM 默认使用非流式 `invoke`，降低长文本评分阶段与 SSE 解析耦合导致的卡住风险。
 - `/stream_run` 过程中如果遇到异常流式 chunk，会过滤 `reasoning_content` 一类非正文内容；若流式执行仍异常，会自动降级为一次非流式聚合执行，再通过 SSE 回传最终结果。
+- 正常流式结束的 `StopAsyncIteration` 不再被误判为异常；只有真实流式异常才会触发 fallback。
+- fallback 非流式执行即使再次失败，也会通过 SSE 返回最终 `final` 事件，避免前端一直停在“分析中”。
+- 内部评分 LLM 调用前会打印实际生效的 `model / streaming / thinking / timeout / max_completion_tokens / payload_chars` 诊断日志，便于 Coze 部署环境排查。
 
 并发维度和两阶段相关默认入口已从当前代码中删除；如需追溯，可查看历史提交。
 

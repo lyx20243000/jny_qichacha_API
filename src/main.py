@@ -226,6 +226,8 @@ class GraphService:
                     continue
                 try:
                     chunk = next_chunk_task.result()
+                except StopAsyncIteration:
+                    break
                 except Exception as exc:
                     stream_error = exc
                     logger.warning(
@@ -234,8 +236,6 @@ class GraphService:
                         exc,
                         exc_info=True,
                     )
-                    break
-                except StopAsyncIteration:
                     break
                 finally:
                     next_chunk_task = None
@@ -258,7 +258,21 @@ class GraphService:
                         "message": "流式输出异常，已自动切换为非流式聚合返回",
                     }
                 )
-                fallback_result = await self.run(payload, ctx)
+                try:
+                    fallback_result = await self.run(payload, ctx)
+                except Exception as fallback_exc:
+                    logger.error(
+                        "fallback non-stream execution failed: run_id=%s error=%s",
+                        run_id,
+                        fallback_exc,
+                        exc_info=True,
+                    )
+                    fallback_result = {
+                        "status": "error",
+                        "run_id": run_id,
+                        "mode": "fallback_non_stream",
+                        "message": f"Fallback execution failed: {fallback_exc}",
+                    }
                 yield self._sse_event(
                     {
                         "type": "final",
