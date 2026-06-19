@@ -647,7 +647,12 @@ async def http_run(request: Request) -> Dict[str, Any]:
         payload = await request.json()
 
         # 创建任务并记录 - 这是关键，让我们可以通过run_id取消任务
-        task = asyncio.create_task(service.run(payload, ctx))
+        if should_use_fixed_enterprise_runner(payload):
+            logger.info("Using fixed enterprise analysis runner for /run run_id=%s", run_id)
+            task = asyncio.create_task(run_enterprise_analysis(payload, run_id=run_id))
+        else:
+            logger.info("Using LangChain Agent runner for /run run_id=%s", run_id)
+            task = asyncio.create_task(service.run(payload, ctx))
         service.running_tasks[run_id] = task
 
         try:
