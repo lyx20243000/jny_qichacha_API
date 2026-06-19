@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -16,6 +17,10 @@ from tools.tool_runtime_helpers import invoke_langchain_tool
 logger = logging.getLogger(__name__)
 
 ANALYSIS_MODE_KEY = "analysis_mode"
+USCC_PATTERN = re.compile(r"^[0-9A-Z]{18}$")
+ENTERPRISE_HINT_PATTERN = re.compile(
+    r"(公司|企业|集团|有限责任公司|有限公司|股份有限公司|统一社会信用代码|信用代码|工商|启信宝|企查查)"
+)
 
 
 def extract_user_input(payload: dict[str, Any]) -> str:
@@ -66,7 +71,21 @@ def should_use_fixed_enterprise_runner(payload: dict[str, Any]) -> bool:
     if mode in {"enterprise", "fixed", "report"}:
         return True
 
-    return bool(extract_user_input(payload))
+    for key in ("enterprise_name", "user_input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+
+    text = extract_user_input(payload)
+    if not text:
+        return False
+
+    normalized = re.sub(r"[\s\-]", "", text).upper()
+    if USCC_PATTERN.fullmatch(normalized):
+        return True
+    if len(text.strip()) <= 80 and ENTERPRISE_HINT_PATTERN.search(text):
+        return True
+    return False
 
 
 def _ai_message(content: str) -> dict[str, str]:

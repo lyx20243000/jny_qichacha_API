@@ -17,7 +17,7 @@
 
 ## 当前默认流程
 
-当前默认流程已经对齐参考项目的机制，主链路是：
+当前默认流程已经对齐参考项目的机制，`/run` 和命中企业分析的 `/stream_run` 都优先走固定主链路：
 
 1. `analyze_enterprise_report`
 2. `collect_enterprise_evidence`

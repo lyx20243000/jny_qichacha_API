@@ -35,7 +35,13 @@
 
 ### `/stream_run`
 
-`/stream_run` 仍走 Coze/Agent 的流式通道，但由于默认 Agent 工具面已收口为单工具，实际业务分析也会被引导到同一条固定主链路。
+`/stream_run` 在 agent 项目下如果命中企业分析请求，也会直接旁路外层 Agent，改走 fixed runner 的 SSE 包装流：
+
+1. 周期性发送 `progress`
+2. 后台执行 `run_enterprise_analysis`
+3. 完成后发送 `final`
+
+这样可以避免“工具执行完了，外层 Agent 还要再接一轮 LLM 收口”带来的额外等待。
 
 ## Agent 工具面
 

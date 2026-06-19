@@ -737,7 +737,97 @@ async def http_stream_run(request: Request):
         logger.error(f"JSON decode error in http_stream_run: {e}, traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"Invalid JSON format:{extract_core_stack()}")
 
-    if is_agent:
+    async def fixed_runner_stream():
+        started_at = time.monotonic()
+        task = asyncio.create_task(run_enterprise_analysis(payload, run_id=run_id))
+        service.running_tasks[run_id] = task
+        try:
+            yield service._sse_event(
+                {
+                    "type": "progress",
+                    "run_id": run_id,
+                    "mode": "fixed_enterprise_runner",
+                    "message": "已进入固定企业分析主链路",
+                }
+            )
+            while True:
+                remaining = float(TIMEOUT_SECONDS) - (time.monotonic() - started_at)
+                if remaining <= 0:
+                    logger.error(f"Fixed stream execution timeout after {TIMEOUT_SECONDS}s for run_id: {run_id}")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    yield service._sse_event(
+                        {
+                            "type": "final",
+                            "run_id": run_id,
+                            "mode": "fixed_enterprise_runner",
+                            "data": {
+                                "status": "timeout",
+                                "run_id": run_id,
+                                "message": f"Execution timeout: exceeded {TIMEOUT_SECONDS} seconds",
+                            },
+                        }
+                    )
+                    return
+
+                done, _ = await asyncio.wait(
+                    {task},
+                    timeout=min(STREAM_PROGRESS_INTERVAL_SECONDS, remaining),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    yield service._sse_event(
+                        {
+                            "type": "progress",
+                            "run_id": run_id,
+                            "mode": "fixed_enterprise_runner",
+                            "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                            "message": "固定企业分析处理中，请稍候",
+                        }
+                    )
+                    continue
+                break
+
+            try:
+                result = task.result()
+            except asyncio.CancelledError:
+                result = {
+                    "status": "cancelled",
+                    "run_id": run_id,
+                    "message": "Execution was cancelled",
+                }
+            except Exception as exc:
+                logger.error(
+                    "Fixed stream execution failed: run_id=%s error=%s",
+                    run_id,
+                    exc,
+                    exc_info=True,
+                )
+                result = {
+                    "status": "error",
+                    "run_id": run_id,
+                    "message": f"Fixed enterprise analysis failed: {exc}",
+                }
+
+            yield service._sse_event(
+                {
+                    "type": "final",
+                    "run_id": run_id,
+                    "mode": "fixed_enterprise_runner",
+                    "data": result,
+                }
+            )
+        finally:
+            service.running_tasks.pop(run_id, None)
+            cozeloop.flush()
+
+    if is_agent and should_use_fixed_enterprise_runner(payload):
+        logger.info("Using fixed enterprise analysis runner for /stream_run run_id=%s", run_id)
+        stream_generator = fixed_runner_stream()
+    elif is_agent:
         stream_generator = agent_stream_handler(
             payload=payload,
             ctx=ctx,
