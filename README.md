@@ -58,6 +58,16 @@
 - `qcc_data_json`
 - `collection_diagnostics`
 
+其中 `identity` 和 `candidates` 的对外字段现在已经统一标准化，优先使用：
+
+- `enterprise_name`
+- `unified_social_credit_code`
+- `region`
+- `industry`
+- `status`
+
+这样固定 runner、候选确认展示和后续报告链路都不再依赖历史乱码字段名。
+
 `qcc_data_json` 名称暂时保留，只是为了兼容现有报告工具；内部承载的已经是“启信宝主源 + 企查查 MCP 补充”的统一结构化结果。
 
 ## Agent 暴露面

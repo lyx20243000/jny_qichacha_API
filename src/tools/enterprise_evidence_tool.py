@@ -122,6 +122,106 @@ DEFAULT_COLLECTION_MODE = os.getenv("ENTERPRISE_COLLECTION_MODE", "standard").st
 if DEFAULT_COLLECTION_MODE not in COLLECTION_MODES:
     DEFAULT_COLLECTION_MODE = "standard"
 
+LEGACY_ENTERPRISE_NAME_KEY = "浼佷笟鍚嶇О"
+LEGACY_CREDIT_CODE_KEY = "缁熶竴绀句細淇＄敤浠ｇ爜"
+LEGACY_REGION_KEYS = ("鎵€灞炲湴鍖�", "鍦板尯")
+LEGACY_INDUSTRY_KEYS = ("鍥芥爣琛屼笟", "琛屼笟")
+LEGACY_STATUS_KEYS = ("鐧昏鐘舵€�", "缁忚惀鐘舵€�")
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return str(value).strip()
+    return ""
+
+
+def _normalize_identity_candidate(target: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(target or {})
+    enterprise_name = _first_non_empty(
+        normalized.get("enterprise_name"),
+        normalized.get("企业名称"),
+        normalized.get(LEGACY_ENTERPRISE_NAME_KEY),
+        normalized.get("name"),
+    )
+    credit_code = _first_non_empty(
+        normalized.get("unified_social_credit_code"),
+        normalized.get("统一社会信用代码"),
+        normalized.get(LEGACY_CREDIT_CODE_KEY),
+        normalized.get("credit_code"),
+        normalized.get("creditCode"),
+    )
+    region = _first_non_empty(
+        normalized.get("region"),
+        normalized.get("province"),
+        normalized.get("地区"),
+        *(normalized.get(key) for key in LEGACY_REGION_KEYS),
+    )
+    industry = _first_non_empty(
+        normalized.get("industry"),
+        normalized.get("行业"),
+        *(normalized.get(key) for key in LEGACY_INDUSTRY_KEYS),
+    )
+    status = _first_non_empty(
+        normalized.get("status"),
+        normalized.get("登记状态"),
+        *(normalized.get(key) for key in LEGACY_STATUS_KEYS),
+    )
+
+    if enterprise_name:
+        normalized["enterprise_name"] = enterprise_name
+        normalized["企业名称"] = enterprise_name
+    if credit_code:
+        normalized["unified_social_credit_code"] = credit_code
+        normalized["统一社会信用代码"] = credit_code
+    if region:
+        normalized["region"] = region
+        normalized["地区"] = region
+    if industry:
+        normalized["industry"] = industry
+        normalized["行业"] = industry
+    if status:
+        normalized["status"] = status
+        normalized["登记状态"] = status
+    return normalized
+
+
+def _normalize_identity_result(identity: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(identity, dict):
+        return {}
+
+    normalized = dict(identity)
+    if identity.get("status") == "confirmed":
+        profile = identity.get("enterprise_profile")
+        normalized_profile = _normalize_identity_candidate(profile) if isinstance(profile, dict) else {}
+        if normalized_profile:
+            normalized["enterprise_profile"] = normalized_profile
+
+        enterprise_name = _first_non_empty(
+            identity.get("enterprise_name"),
+            normalized_profile.get("enterprise_name"),
+        )
+        credit_code = _first_non_empty(
+            identity.get("unified_social_credit_code"),
+            normalized_profile.get("unified_social_credit_code"),
+        )
+        if enterprise_name:
+            normalized["enterprise_name"] = enterprise_name
+        if credit_code:
+            normalized["unified_social_credit_code"] = credit_code
+            normalized["mcp_search_key"] = credit_code
+        elif enterprise_name:
+            normalized["mcp_search_key"] = enterprise_name
+        return normalized
+
+    candidates = identity.get("candidates")
+    if isinstance(candidates, list):
+        normalized["candidates"] = [
+            _normalize_identity_candidate(item) if isinstance(item, dict) else item
+            for item in candidates
+        ]
+    return normalized
+
 
 def _identity_result(status: str, **kwargs) -> dict:
     result = {"status": status}
@@ -1221,7 +1321,7 @@ def collect_enterprise_evidence(user_input: str, collection_mode: str = "") -> s
     progress = [
         _progress_event("subject_identity", "running", collection_started_at, f"正在确认企业名称和统一社会信用代码，采集模式={collection_mode}")
     ]
-    identity = _confirm_enterprise_identity(user_input)
+    identity = _normalize_identity_result(_confirm_enterprise_identity(user_input))
     progress.append(
         _progress_event(
             "subject_identity",

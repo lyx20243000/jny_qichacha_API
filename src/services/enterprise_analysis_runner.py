@@ -95,9 +95,36 @@ def _ai_message(content: str) -> dict[str, str]:
 def _extract_confirmed_enterprise_name(identity: dict[str, Any], fallback: str) -> str:
     return str(
         identity.get("enterprise_name")
-        or identity.get("浼佷笟鍚嶇О")
+        or identity.get("企业名称")
         or identity.get("name")
         or fallback
+    ).strip()
+
+
+def _extract_candidate_credit_code(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("unified_social_credit_code")
+        or candidate.get("统一社会信用代码")
+        or candidate.get("credit_code")
+        or candidate.get("creditCode")
+        or ""
+    ).strip()
+
+
+def _extract_candidate_region(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("region")
+        or candidate.get("province")
+        or candidate.get("地区")
+        or ""
+    ).strip()
+
+
+def _extract_candidate_status(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("status")
+        or candidate.get("登记状态")
+        or ""
     ).strip()
 
 
@@ -113,18 +140,13 @@ def _format_identity_confirmation(identity: dict[str, Any]) -> str:
             continue
         name = (
             candidate.get("enterprise_name")
-            or candidate.get("浼佷笟鍚嶇О")
+            or candidate.get("企业名称")
             or candidate.get("name")
             or "未获取"
         )
-        code = (
-            candidate.get("unified_social_credit_code")
-            or candidate.get("缁熶竴绀句細淇＄敤浠ｇ爜")
-            or candidate.get("credit_code")
-            or "未获取"
-        )
-        region = candidate.get("鍦板尯") or candidate.get("region") or candidate.get("province") or ""
-        status = candidate.get("鐘舵€") or candidate.get("status") or ""
+        code = _extract_candidate_credit_code(candidate) or "未获取"
+        region = _extract_candidate_region(candidate)
+        status = _extract_candidate_status(candidate)
         details = " | ".join(str(item) for item in (name, code, region, status) if item)
         lines.append(f"{index}. {details}")
     lines.append("请回复编号、完整企业名称或统一社会信用代码。")

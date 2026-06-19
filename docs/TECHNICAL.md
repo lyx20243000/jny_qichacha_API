@@ -88,6 +88,16 @@
 - 真实含义已经不是“企查查 OpenAPI 数据”
 - 而是“启信宝主结构化结果 + 企查查 MCP 补充结果”的统一承载对象
 
+另外，主体确认返回的 `identity` / `candidates` 已在固定采集出口做标准化清洗。当前对外统一字段是：
+
+- `enterprise_name`
+- `unified_social_credit_code`
+- `region`
+- `industry`
+- `status`
+
+fixed runner 和候选展示层不再依赖历史乱码 key；旧字段仅作为内部兼容来源保留。
+
 ## 独立评分阶段
 
 新增：

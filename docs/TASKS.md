@@ -27,6 +27,7 @@
 - [x] `generate_enterprise_report_single` 改为向后兼容包装层
 - [x] 默认 Agent 工具面收口为 `analyze_enterprise_report`
 - [x] 修复 `src/main.py` 中 fixed runner 分支缺少 import 的确定性问题
+- [x] 清理 fixed runner 侧历史乱码字段读取，并把 `identity/candidates` 对外字段标准化为 `enterprise_name / unified_social_credit_code / region / industry / status`
 - [x] README、TECHNICAL、TASKS 文档同步到当前真实架构
 
 ## 待验证
