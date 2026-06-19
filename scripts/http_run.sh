@@ -1,6 +1,8 @@
 #!/bin/bash
 
 set -e
+# 自动获取 git commit hash 作为版本标识
+export GIT_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
 # 导出环境变量
 
 WORK_DIR="${COZE_WORKSPACE_PATH:-.}"
