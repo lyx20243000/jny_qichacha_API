@@ -46,6 +46,10 @@ from coze_coding_utils.async_tasks import config as async_task_config
 from coze_coding_utils.async_tasks.headers import HEADER_X_RUN_ID as _ASYNC_HEADER_X_RUN_ID
 from coze_coding_utils.runtime_ctx.context import new_context as _new_async_ctx
 from sqlalchemy import event
+from services.enterprise_analysis_runner import (
+    run_enterprise_analysis,
+    should_use_fixed_enterprise_runner,
+)
 
 setup_logging(
     log_file=LOG_FILE,
