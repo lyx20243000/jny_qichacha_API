@@ -73,6 +73,121 @@ TIMEOUT_SECONDS = 900  # 15分钟
 STREAM_PROGRESS_INTERVAL_SECONDS = 10
 
 
+def _extract_openai_model(payload: Dict[str, Any]) -> str:
+    model = payload.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return "enterprise-analysis-fixed-runner"
+
+
+def _chunk_text(content: str, chunk_size: int = 1200) -> list[str]:
+    text = str(content or "")
+    if not text:
+        return [""]
+    size = max(1, int(chunk_size))
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _openai_completion_response(content: str, *, model: str, completion_id: str) -> Dict[str, Any]:
+    created = int(time.time())
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _openai_chunk_response(
+    *,
+    model: str,
+    completion_id: str,
+    delta: Dict[str, Any],
+    finish_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+
+
+def _format_openai_sse(data: Any) -> str:
+    if data == "[DONE]":
+        return "data: [DONE]\n\n"
+    return f"data: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+async def _run_fixed_openai_chat(payload: Dict[str, Any], ctx: Context) -> Any:
+    run_id = ctx.run_id
+    model = _extract_openai_model(payload)
+    completion_id = f"chatcmpl-{run_id}"
+    stream = bool(payload.get("stream"))
+    task = asyncio.create_task(run_enterprise_analysis(payload, run_id=run_id))
+    service.running_tasks[run_id] = task
+
+    async def stream_response() -> AsyncGenerator[str, None]:
+        try:
+            yield _format_openai_sse(
+                _openai_chunk_response(
+                    model=model,
+                    completion_id=completion_id,
+                    delta={"role": "assistant"},
+                )
+            )
+            result = await task
+            content = str((result or {}).get("output") or (result or {}).get("result") or "")
+            for part in _chunk_text(content):
+                yield _format_openai_sse(
+                    _openai_chunk_response(
+                        model=model,
+                        completion_id=completion_id,
+                        delta={"content": part},
+                    )
+                )
+            yield _format_openai_sse(
+                _openai_chunk_response(
+                    model=model,
+                    completion_id=completion_id,
+                    delta={},
+                    finish_reason="stop",
+                )
+            )
+            yield _format_openai_sse("[DONE]")
+        finally:
+            service.running_tasks.pop(run_id, None)
+            cozeloop.flush()
+
+    try:
+        if stream:
+            return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+        result = await task
+        content = str((result or {}).get("output") or (result or {}).get("result") or "")
+        return JSONResponse(_openai_completion_response(content, model=model, completion_id=completion_id))
+    finally:
+        if not stream:
+            service.running_tasks.pop(run_id, None)
+
+
 def _patch_reasoning_content(items):
     """
     Intercept graph.stream() output and merge reasoning_content into content
@@ -927,6 +1042,12 @@ async def openai_chat_completions(request: Request):
 
     try:
         payload = await request.json()
+        if should_use_fixed_enterprise_runner(payload):
+            logger.info(
+                "Using fixed enterprise analysis runner for /v1/chat/completions run_id=%s",
+                ctx.run_id,
+            )
+            return await _run_fixed_openai_chat(payload, ctx)
         return await openai_handler.handle(payload, ctx)
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error in openai_chat_completions: {e}")

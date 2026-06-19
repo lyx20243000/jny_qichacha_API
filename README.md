@@ -13,11 +13,19 @@
 - 企查查 MCP：补充数据源
 - 内置 web_search：公开搜索补充
 - 不再使用企查查 OpenAPI
-- 不接入飞书、钉钉
+- 默认生产主链路不依赖飞书、钉钉，但保留渠道适配代码
 
 ## 当前默认流程
 
-当前默认流程已经对齐参考项目的机制，`/run` 和命中企业分析的 `/stream_run` 都优先走固定主链路：
+当前默认流程已经对齐参考项目的机制，以下入口的企业分析请求都会优先走固定主链路：
+
+- `/run`
+- `/stream_run`
+- `/v1/chat/completions`
+- 飞书渠道
+- 钉钉渠道
+
+固定主链路为：
 
 1. `analyze_enterprise_report`
 2. `collect_enterprise_evidence`
@@ -83,6 +91,12 @@
 ## 兼容入口
 
 `generate_enterprise_report_single` 还保留着，但现在只是一个向后兼容包装层，内部直接转到固定 runner，不再是独立主架构。
+
+另外，`/v1/chat/completions` 已增加企业分析直连 fixed runner 的兼容层：
+
+- `stream=false` 时返回单次 OpenAI chat completion 响应
+- `stream=true` 时返回 OpenAI chunk SSE
+- 非企业分析请求仍回退到原有 `OpenAIChatHandler`
 
 ## 关键文件
 

@@ -16,7 +16,7 @@
 - 启信宝 API 为主数据源
 - 企查查 MCP 为补充数据源
 - 不使用企查查 OpenAPI
-- 不接入飞书、钉钉
+- 默认生产主链路不依赖飞书、钉钉，但保留渠道适配代码
 
 ## 已完成
 
@@ -29,6 +29,8 @@
 - [x] 修复 `src/main.py` 中 fixed runner 分支缺少 import 的确定性问题
 - [x] 清理 fixed runner 侧历史乱码字段读取，并把 `identity/candidates` 对外字段标准化为 `enterprise_name / unified_social_credit_code / region / industry / status`
 - [x] README、TECHNICAL、TASKS 文档同步到当前真实架构
+- [x] `/v1/chat/completions` 的企业分析请求直连 fixed runner
+- [x] 飞书、钉钉渠道的企业分析请求直连 fixed runner，非企业分析再回退 Agent
 
 ## 待验证
 

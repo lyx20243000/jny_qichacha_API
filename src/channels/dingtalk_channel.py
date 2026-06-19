@@ -27,6 +27,10 @@ from dingtalk_stream import DingTalkStreamClient, Credential, AckMessage
 
 from agents.agent import build_agent
 from coze_coding_utils.runtime_ctx.context import new_context
+from services.enterprise_analysis_runner import (
+    run_enterprise_analysis_sync,
+    should_use_fixed_enterprise_runner,
+)
 
 logger = logging.getLogger(__name__)
 ANALYSIS_START_NOTICE = "收到，开始分析，预计约 5 分钟后出分析结果。"
@@ -66,6 +70,10 @@ def _call_agent(user_text: str, conversation_id: str) -> str:
     使用 conversation_id 作为 thread_id，确保同一会话的上下文连续。
     """
     try:
+        if should_use_fixed_enterprise_runner({"messages": [("user", user_text)]}):
+            logger.info("DingTalk request routed to fixed enterprise runner")
+            return run_enterprise_analysis_sync(user_input=str(user_text).strip())
+
         ctx = new_context(method="dingtalk_channel")
         agent = build_agent(ctx=ctx)
 

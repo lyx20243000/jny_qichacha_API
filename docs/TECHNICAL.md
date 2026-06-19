@@ -43,6 +43,28 @@
 
 这样可以避免“工具执行完了，外层 Agent 还要再接一轮 LLM 收口”带来的额外等待。
 
+### `/v1/chat/completions`
+
+`/v1/chat/completions` 现在也按同样原则处理企业分析请求：
+
+1. 先复用 `should_use_fixed_enterprise_runner` 做统一路由判断
+2. 命中企业分析时，直接执行 `run_enterprise_analysis`
+3. `stream=false` 时返回 OpenAI 兼容的单次 completion
+4. `stream=true` 时把 fixed runner 结果包装成 OpenAI chunk SSE
+5. 未命中企业分析时，才回退到原有 `OpenAIChatHandler`
+
+这样 OpenAI 兼容入口不再是另一条独立企业分析链路。
+
+### 飞书 / 钉钉
+
+飞书和钉钉渠道的企业分析消息也已经收口：
+
+1. 渠道层提取用户文本
+2. 命中企业分析时直接调用 `run_enterprise_analysis_sync`
+3. 非企业分析消息才回退到 `build_agent(...).invoke(...)`
+
+这样渠道侧不会再因为额外的 Agent 收口而走出和 HTTP 入口不同的分析路径。
+
 ## Agent 工具面
 
 当前默认 Agent 只暴露：
